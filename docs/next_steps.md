@@ -1096,12 +1096,13 @@ encoder: no WG1 stream has it, and Kakadu 8.4.1 with `Cplex` and
 `SCP15_caps=SETS` only sets the Ccap15 bit. Done, 2026-10-28: lossless HT
 encoding (`--ht`), one cleanup pass per block through every raster and
 wide writer, decoded exactly by Kakadu, Grok, and OpenJPEG, at Kakadu's
-file size. Speed, two passes, 2026-10-28: one thread codes the 2048x2048
-RGB image's blocks in 55 ms (was 155) and the whole encode takes about 90
-ms against Kakadu's 35 ms; twenty threads take 28 ms against about 25
-(`benchmarks.md`). What remains is the serial per-pair work and bit
-packing (about 40 ms), first touches of the freshly allocated planes, and
-payload copies in the codestream assembly. Next, in order: quantization-driven lossy HT
+file size. Speed, three passes, 2026-10-28: one thread codes the
+2048x2048 RGB image's blocks in 29 ms (was 155) and the whole encode takes
+about 65 ms against Kakadu's 35 ms; twenty threads take 25 ms, level with
+Kakadu (`benchmarks.md`). What remains at one thread is the line analysis
+(7 ms), the serial codeword loop (about 10), MagSgn (7), and outside the
+block coder the TIFF read, RCT, and DWT passes over fresh 32-bit planes
+(about 26 ms together) and the segment and codestream copies. Next, in order: quantization-driven lossy HT
 (9/7), rate targets through complexity control (HT SigProp and MagRef
 passes, then MULTIHT streams of z2000's own making), and encoder and
 decoder speed alongside.

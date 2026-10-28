@@ -329,6 +329,10 @@ pub fn Encoder(comptime Coefficient: type) type {
         values: std.ArrayList(Magnitude) = .empty,
         /// The current quad row's `QuadRow` arrays.
         quad_row: std.ArrayList(u8) = .empty,
+        /// `QuadRow.index`.
+        indices: std.ArrayList(u16) = .empty,
+        /// The current quad row's MagSgn bits, pair by pair.
+        words: std.ArrayList(u64) = .empty,
 
         const Magnitude = @Int(.unsigned, @bitSizeOf(Coefficient));
 
@@ -343,6 +347,8 @@ pub fn Encoder(comptime Coefficient: type) type {
             self.lines.deinit(self.allocator);
             self.values.deinit(self.allocator);
             self.quad_row.deinit(self.allocator);
+            self.indices.deinit(self.allocator);
+            self.words.deinit(self.allocator);
             self.* = undefined;
         }
 
@@ -382,26 +388,34 @@ pub fn Encoder(comptime Coefficient: type) type {
             var above = self.lines.items[0..line_length];
             const top = self.lines.items[line_length..][0..line_length];
             var bottom = self.lines.items[2 * line_length ..][0..line_length];
-            try self.values.resize(self.allocator, 4 * quad_width);
-            const top_values = self.values.items[0 .. 2 * quad_width];
-            const bottom_values = self.values.items[2 * quad_width ..];
             const row_length = quad_width + QuadRow.lanes;
+            // The value lines run on past the block too, for
+            // `packMagSgnPairs`.
+            try self.values.resize(self.allocator, 4 * row_length);
+            const top_values = self.values.items[0 .. 2 * row_length];
+            const bottom_values = self.values.items[2 * row_length ..];
             try self.quad_row.resize(self.allocator, 5 * row_length);
+            try self.indices.resize(self.allocator, row_length);
             const row = QuadRow{
                 .rho = self.quad_row.items[0..row_length],
                 .bound = self.quad_row.items[row_length..][0..row_length],
                 .residual = self.quad_row.items[2 * row_length ..][0..row_length],
-                .at_bound = self.quad_row.items[3 * row_length ..][0..row_length],
-                .above_context = self.quad_row.items[4 * row_length ..][0..row_length],
+                .known = self.quad_row.items[3 * row_length ..][0..row_length],
+                .mag_sgn_length = self.quad_row.items[4 * row_length ..][0..row_length],
+                .index = self.indices.items,
             };
+            try self.words.resize(self.allocator, row_length);
 
             var magnitudes: Magnitude = 0;
             var non_zero_count: u32 = 0;
             var qy: usize = 0;
             while (qy < quad_height) : (qy += 1) {
                 const initial = qy == 0;
-                const table = if (initial) &cxt_vlc_encode_0 else &cxt_vlc_encode_1;
                 const y = 2 * qy;
+                // The next quad row's samples, rows a stride apart, on their
+                // way into the cache meanwhile.
+                if (y + 2 < height) prefetchLine(samples[(y + 2) * stride ..][0..width]);
+                if (y + 3 < height) prefetchLine(samples[(y + 3) * stride ..][0..width]);
                 magnitudes |= analyzeLine(samples[y * stride ..][0..width], top, top_values);
                 if (y + 1 < height) {
                     magnitudes |= analyzeLine(samples[(y + 1) * stride ..][0..width], bottom, bottom_values);
@@ -409,80 +423,100 @@ pub fn Encoder(comptime Coefficient: type) type {
                     @memset(bottom, 0);
                     @memset(bottom_values, 0);
                 }
-                row.analyze(initial, top, bottom, above, quad_width);
-                var left_rho: u4 = 0;
-                var qx: usize = 0;
-                while (qx < quad_width) : (qx += 2) {
-                    const pair = qx + 1 < quad_width;
-                    // Without a pair the second quad stays empty and codes
-                    // nothing.
-                    const rhos = [2]u4{ @intCast(row.rho[qx]), if (pair) @intCast(row.rho[qx + 1]) else 0 };
-                    non_zero_count += @popCount(rhos[0]) + @as(u32, @popCount(rhos[1]));
-                    const bounds = [2]u8{ row.bound[qx], row.bound[qx + 1] };
-                    const residuals = [2]u8{ row.residual[qx], if (pair) row.residual[qx + 1] else 0 };
-                    var known: [2]u4 = .{ 0, 0 };
-                    // The pair's VLC bits, at most 39, go out at once.
-                    var vlc_bits = Bits{};
-                    inline for (0..2) |i| {
-                        if (i == 0 or pair) {
-                            const rho = rhos[i];
-                            const left = if (i == 0) left_rho else rhos[0];
-                            const context = if (initial)
-                                quadContext(true, left, above, qx + i)
-                            else
-                                row.above_context[qx + i] + 2 * (((left >> 2) | (left >> 3)) & 1);
-                            // encodeSigEMB, the inverse of decodeSigEMB
-                            // (7.3.5): context 0 codes significance in MEL.
-                            if (context == 0) mel.encode(@intFromBool(rho != 0));
-                            if (context != 0 or rho != 0) {
-                                const at_bound: u4 = @intCast(row.at_bound[qx + i]);
-                                const code = table[vlcEncodeIndex(context, rho, @intFromBool(residuals[i] != 0), at_bound)];
-                                if (code.len == 0) return Error.InvalidBlock;
-                                known[i] = code.e_k;
-                                vlc_bits.add(code.codeword, code.len);
-                            }
-                        }
-                    }
-                    left_rho = if (pair) rhos[1] else rhos[0];
-                    encodeResiduals(&vlc_bits, &mel, initial, residuals);
-                    vlc.put(vlc_bits.value, vlc_bits.count);
-                    // The pair's MagSgn bits go out together while they fit;
-                    // an insignificant sample adds none.
-                    var mag_sgn_bits = Bits{};
-                    inline for (0..2) |i| {
-                        const rho = rhos[i];
-                        if (rho != 0) {
-                            const total = @as(u16, bounds[i]) * @popCount(rho) - @popCount(known[i]);
-                            if (mag_sgn_bits.count + total > 56) {
-                                mag_sgn.put(mag_sgn_bits.value, mag_sgn_bits.count);
-                                mag_sgn_bits = .{};
-                            }
-                            const fits = total <= 56;
-                            inline for (0..4) |j| {
-                                const significant = (rho >> j) & 1;
-                                const implicit: u8 = (known[i] >> j) & 1;
-                                const n = (bounds[i] - implicit) & (0 -% @as(u8, significant));
-                                const value: u64 = (if ((j & 1) != 0) bottom_values else top_values)[2 * (qx + i) + (j >> 1)];
-                                if (fits) {
-                                    mag_sgn_bits.add(value & ((@as(u64, 1) << @intCast(n)) - 1), n);
-                                } else {
-                                    // Wide magnitudes: sample by sample.
-                                    mag_sgn.put(mag_sgn_bits.value, mag_sgn_bits.count);
-                                    mag_sgn_bits = .{};
-                                    mag_sgn.put(value, n);
+                const widest = row.analyze(initial, top, bottom, above, quad_width);
+                switch (initial) {
+                    inline else => |first_row| {
+                        const table = if (first_row) &cxt_vlc_encode_0 else &cxt_vlc_encode_1;
+                        const left_contexts = &left_context_indices[@intFromBool(first_row)];
+                        var left_rho: u4 = 0;
+                        var qx: usize = 0;
+                        while (qx < quad_width) : (qx += 2) {
+                            const pair = qx + 1 < quad_width;
+                            // Past the block `QuadRow` reads zero exponents,
+                            // so a missing second quad is empty; it codes
+                            // nothing.
+                            const rhos = [2]u4{ @intCast(row.rho[qx]), @intCast(row.rho[qx + 1]) };
+                            non_zero_count += @popCount(rhos[0]) + @as(u32, @popCount(rhos[1]));
+                            const residuals = [2]u8{ row.residual[qx], row.residual[qx + 1] };
+                            // The pair's VLC bits, at most 38, go out at once.
+                            var vlc_bits = Bits{};
+                            inline for (0..2) |i| {
+                                if (i == 0 or pair) {
+                                    const left = if (i == 0) left_rho else rhos[0];
+                                    const index = row.index[qx + i] | left_contexts[left];
+                                    // encodeSigEMB, the inverse of
+                                    // decodeSigEMB (7.3.5): context 0 codes
+                                    // significance in MEL, and an
+                                    // insignificant quad there no codeword,
+                                    // which its table entry gives as zero
+                                    // bits. The tables code every other quad
+                                    // (tested).
+                                    if (index < 1 << 9) mel.encode(@intFromBool(rhos[i] != 0));
+                                    const code = table[index];
+                                    row.known[qx + i] = code.e_k;
+                                    vlc_bits.add(code.codeword, code.len);
                                 }
                             }
+                            left_rho = if (pair) rhos[1] else rhos[0];
+                            if (first_row) {
+                                encodeInitialResiduals(&vlc_bits, &mel, residuals);
+                            } else if ((residuals[0] | residuals[1]) < 16) {
+                                const code = residual_pairs[(@as(usize, residuals[0]) << 4) | residuals[1]];
+                                vlc_bits.add(code.bits, code.len);
+                            } else {
+                                encodeResiduals(&vlc_bits, residuals);
+                            }
+                            vlc.put(vlc_bits.value, vlc_bits.count);
+                        }
+                    },
+                }
+                // The MagSgn bits, a quad's at once while they fit; an
+                // insignificant sample adds none, an empty quad nothing.
+                if (widest <= 7) {
+                    // Every quad pair's bits fit one word.
+                    packMagSgnPairs(Magnitude, row, top_values, bottom_values, self.words.items, quad_width);
+                    for (0..(quad_width + 1) / 2) |pair| mag_sgn.put(self.words.items[pair], row.mag_sgn_length[pair]);
+                } else {
+                    for (0..quad_width) |q| {
+                        const rho: u4 = @intCast(row.rho[q]);
+                        const known: u4 = @intCast(row.known[q]);
+                        const bound = row.bound[q];
+                        const total = @as(u16, bound) * @popCount(rho) - @popCount(known);
+                        if (total <= 56) {
+                            var mag_sgn_bits = Bits{};
+                            inline for (0..4) |j| {
+                                const n = magSgnLength(rho, known, bound, j);
+                                const value: u64 = (if ((j & 1) != 0) bottom_values else top_values)[2 * q + (j >> 1)];
+                                mag_sgn_bits.add(value & ((@as(u64, 1) << @intCast(n)) - 1), n);
+                            }
+                            mag_sgn.put(mag_sgn_bits.value, mag_sgn_bits.count);
+                        } else {
+                            // Wide magnitudes: sample by sample.
+                            inline for (0..4) |j| {
+                                const value: u64 = (if ((j & 1) != 0) bottom_values else top_values)[2 * q + (j >> 1)];
+                                mag_sgn.putWide(value, magSgnLength(rho, known, bound, j));
+                            }
                         }
                     }
-                    mag_sgn.put(mag_sgn_bits.value, mag_sgn_bits.count);
                 }
                 // The next quad row predicts from this one's bottom line.
                 std.mem.swap([]u8, &above, &bottom);
             }
             if (magnitudes == 0) return .{ .bytes = &.{}, .bitplanes = 0, .non_zero_count = 0 };
 
-            mag_sgn.finish();
-            terminateMelVlc(&mel, &vlc);
+            // The writers' state stays in registers through the rows: only
+            // inline functions take their addresses, and the ends below
+            // work on copies.
+            var mag_sgn_end = mag_sgn;
+            var mel_end = mel;
+            var vlc_end = vlc;
+            mag_sgn_end.finish();
+            vlc_end.settle();
+            terminateMelVlc(&mel_end, &vlc_end);
+            return self.assemble(mag_sgn_end, mel_end, vlc_end, magnitudes, non_zero_count);
+        }
+
+        fn assemble(self: *Self, mag_sgn: MagSgnWriter, mel: MelWriter, vlc: VlcWriter, magnitudes: Magnitude, non_zero_count: u32) Error!Cleanup {
             const suffix_length = mel.position + vlc.written;
             if (suffix_length > 4079) return Error.InvalidBlock;
             const length = mag_sgn.position + suffix_length;
@@ -498,6 +532,14 @@ pub fn Encoder(comptime Coefficient: type) type {
                 .bitplanes = @intCast(@bitSizeOf(Magnitude) - @clz(magnitudes)),
                 .non_zero_count = non_zero_count,
             };
+        }
+
+        /// Each cache line of `line`.
+        fn prefetchLine(line: []const Coefficient) void {
+            var offset: usize = 0;
+            while (offset < line.len) : (offset += 64 / @sizeOf(Coefficient)) {
+                @prefetch(line.ptr + offset, .{});
+            }
         }
 
         /// One sample line: each exponent E_n at `exponents[x + 1]` (zero
@@ -541,37 +583,34 @@ pub fn Encoder(comptime Coefficient: type) type {
 
 /// What each quad of a row needs before its codewords, none of which
 /// depends on the quad to its left: significance rho_q, the exponent bound
-/// U_q and residual u_q (7.3.7), the samples whose E_n reaches U_q, and the
-/// part of the context c_q the line above gives (Formula 2). Computed a
-/// vector of quads at a time from the exponent lines.
+/// U_q and residual u_q (7.3.7), and its CxtVLC table index from rho_q,
+/// u_off, the samples whose E_n reaches U_q, and the part of the context
+/// c_q the line above gives (Formula 2). Computed a vector of quads at a
+/// time from the exponent lines.
 const QuadRow = struct {
     rho: []u8,
     bound: []u8,
     residual: []u8,
-    at_bound: []u8,
-    above_context: []u8,
+    /// The CxtVLC encode table index of each quad, `vlcEncodeIndex` with
+    /// the part of c_q the line above gives (Formula 2).
+    index: []u16,
+    /// The EMB pattern e_k of each quad's codeword, set as the quads are
+    /// coded.
+    known: []u8,
+    /// Each quad pair's MagSgn bits, from `packMagSgnPairs`.
+    mag_sgn_length: []u8,
 
     const lanes = 16;
     const Bytes = @Vector(lanes, u8);
     const Pairs = @Vector(2 * lanes, u8);
 
-    fn evens() @Vector(lanes, i32) {
-        var mask: [lanes]i32 = undefined;
-        for (&mask, 0..) |*index, lane| index.* = @intCast(2 * lane);
-        return mask;
-    }
-
-    fn odds() @Vector(lanes, i32) {
-        var mask: [lanes]i32 = undefined;
-        for (&mask, 0..) |*index, lane| index.* = @intCast(2 * lane + 1);
-        return mask;
-    }
-
     /// `top`, `bottom`, and `above` are exponent lines in the guard layout
     /// of `quadContext`, zero past the block for whole vectors.
-    fn analyze(self: QuadRow, initial: bool, top: []const u8, bottom: []const u8, above: []const u8, quad_width: usize) void {
+    /// Returns the largest U_q of the row.
+    fn analyze(self: QuadRow, initial: bool, top: []const u8, bottom: []const u8, above: []const u8, quad_width: usize) u8 {
         const zero: Bytes = @splat(0);
         const one: Bytes = @splat(1);
+        var widest = zero;
         var qx: usize = 0;
         while (qx < quad_width) : (qx += lanes) {
             // Quad q's samples are columns 2q and 2q + 1, at 2q + 1 and
@@ -579,10 +618,10 @@ const QuadRow = struct {
             const top_pairs: Pairs = top[2 * qx + 1 ..][0 .. 2 * lanes].*;
             const bottom_pairs: Pairs = bottom[2 * qx + 1 ..][0 .. 2 * lanes].*;
             const exponents = [4]Bytes{
-                @shuffle(u8, top_pairs, undefined, evens()),
-                @shuffle(u8, bottom_pairs, undefined, evens()),
-                @shuffle(u8, top_pairs, undefined, odds()),
-                @shuffle(u8, bottom_pairs, undefined, odds()),
+                @shuffle(u8, top_pairs, undefined, evenLanes(lanes)),
+                @shuffle(u8, bottom_pairs, undefined, evenLanes(lanes)),
+                @shuffle(u8, top_pairs, undefined, oddLanes(lanes)),
+                @shuffle(u8, bottom_pairs, undefined, oddLanes(lanes)),
             };
             var rho = zero;
             inline for (0..4) |j| rho |= @select(u8, exponents[j] != zero, @as(Bytes, @splat(1 << j)), zero);
@@ -593,11 +632,11 @@ const QuadRow = struct {
                 // The bottom line above: columns 2q - 1 to 2q + 2.
                 const near: Pairs = above[2 * qx ..][0 .. 2 * lanes].*;
                 const far: Pairs = above[2 * qx + 2 ..][0 .. 2 * lanes].*;
-                const west = @shuffle(u8, near, undefined, evens()) | @shuffle(u8, near, undefined, odds());
-                const east = @shuffle(u8, far, undefined, evens()) | @shuffle(u8, far, undefined, odds());
+                const west = @shuffle(u8, near, undefined, evenLanes(lanes)) | @shuffle(u8, near, undefined, oddLanes(lanes));
+                const east = @shuffle(u8, far, undefined, evenLanes(lanes)) | @shuffle(u8, far, undefined, oddLanes(lanes));
                 const above_largest = @max(
-                    @max(@shuffle(u8, near, undefined, evens()), @shuffle(u8, near, undefined, odds())),
-                    @max(@shuffle(u8, far, undefined, evens()), @shuffle(u8, far, undefined, odds())),
+                    @max(@shuffle(u8, near, undefined, evenLanes(lanes)), @shuffle(u8, near, undefined, oddLanes(lanes))),
+                    @max(@shuffle(u8, far, undefined, evenLanes(lanes)), @shuffle(u8, far, undefined, oddLanes(lanes))),
                 );
                 // gamma_q: more than one significant sample.
                 const several = (rho & (rho -% one)) != zero;
@@ -607,24 +646,68 @@ const QuadRow = struct {
             const bound = @max(largest, kappa);
             var at_bound = zero;
             inline for (0..4) |j| at_bound |= @select(u8, exponents[j] == bound, @as(Bytes, @splat(1 << j)), zero);
+            const residual = @select(u8, rho != zero, bound - kappa, zero);
             self.rho[qx..][0..lanes].* = rho;
             self.bound[qx..][0..lanes].* = bound;
-            self.residual[qx..][0..lanes].* = @select(u8, rho != zero, bound - kappa, zero);
-            self.at_bound[qx..][0..lanes].* = at_bound;
-            self.above_context[qx..][0..lanes].* = above_context;
+            self.residual[qx..][0..lanes].* = residual;
+            const Indices = @Vector(lanes, u16);
+            const u_off: Indices = @select(u16, residual != zero, @as(Indices, @splat(1 << 4)), @as(Indices, @splat(0)));
+            self.index[qx..][0..lanes].* = (@as(Indices, above_context) << @splat(9)) | (@as(Indices, rho) << @splat(5)) | u_off | @as(Indices, at_bound);
+            widest = @max(widest, bound);
         }
+        return @reduce(.Max, widest);
     }
 };
 
-/// The U-VLC codes of one quad pair (7.3.6), the inverse of the decoder's
-/// residual decoding: prefixes, then suffixes, then extensions, and in an
-/// initial row where both quads have u_off = 1 a MEL symbol saying whether
-/// both residuals exceed 2.
-fn encodeResiduals(vlc: *Bits, mel: *MelWriter, initial: bool, residuals: [2]u8) void {
+/// The part of c_q a quad's left neighbour gives, shifted into a
+/// `vlcEncodeIndex`, by the neighbour's rho_q: in the initial row and
+/// outside it (Formula 1 and 2).
+const left_context_indices = blk: {
+    var indices: [2][16]u16 = undefined;
+    for (0..16) |left| {
+        const rho: u4 = @intCast(left);
+        const w = (rho >> 2) & 1;
+        const sw = (rho >> 3) & 1;
+        indices[0][left] = @as(u16, 2 * (w | sw)) << 9;
+        indices[1][left] = @as(u16, ((rho & 1) | ((rho >> 1) & 1)) + 2 * @as(u16, w) + 4 * @as(u16, sw)) << 9;
+    }
+    break :blk indices;
+};
+
+/// `encodeResiduals` outside the initial row for both residuals below 16,
+/// which code no extension: at most 16 bits.
+const residual_pairs = blk: {
+    @setEvalBranchQuota(10_000);
+    var codes: [256]struct { bits: u16, len: u8 } = undefined;
+    for (0..16) |first| {
+        for (0..16) |second| {
+            var bits = Bits{};
+            encodeResiduals(&bits, .{ first, second });
+            codes[(first << 4) | second] = .{ .bits = @intCast(bits.value), .len = bits.count };
+        }
+    }
+    break :blk codes;
+};
+
+/// The U-VLC codes of one quad pair outside the initial row (7.3.6), the
+/// inverse of the decoder's residual decoding: prefixes, then suffixes, then
+/// extensions; a zero residual codes nothing.
+inline fn encodeResiduals(vlc: *Bits, residuals: [2]u8) void {
+    const codes = [2]UCode{ u_codes[residuals[0]], u_codes[residuals[1]] };
+    vlc.add(codes[0].prefix, codes[0].prefix_len);
+    vlc.add(codes[1].prefix, codes[1].prefix_len);
+    vlc.add(codes[0].suffix, codes[0].suffix_len);
+    vlc.add(codes[1].suffix, codes[1].suffix_len);
+    vlc.add(codes[0].extension, codes[0].extension_len);
+    vlc.add(codes[1].extension, codes[1].extension_len);
+}
+
+/// `encodeResiduals` in the initial row, where a pair with u_off = 1 in both
+/// quads first codes in MEL whether both residuals exceed 2.
+inline fn encodeInitialResiduals(vlc: *Bits, mel: *MelWriter, residuals: [2]u8) void {
     var first = residuals[0];
     var second = residuals[1];
-    if (first == 0 and second == 0) return;
-    if (initial and first != 0 and second != 0) {
+    if (first != 0 and second != 0) {
         const both_large = first > 2 and second > 2;
         mel.encode(@intFromBool(both_large));
         if (both_large) {
@@ -641,13 +724,75 @@ fn encodeResiduals(vlc: *Bits, mel: *MelWriter, initial: bool, residuals: [2]u8)
             return;
         }
     }
-    const codes = [2]UCode{ u_codes[first], u_codes[second] };
-    vlc.add(codes[0].prefix, codes[0].prefix_len);
-    vlc.add(codes[1].prefix, codes[1].prefix_len);
-    vlc.add(codes[0].suffix, codes[0].suffix_len);
-    vlc.add(codes[1].suffix, codes[1].suffix_len);
-    vlc.add(codes[0].extension, codes[0].extension_len);
-    vlc.add(codes[1].extension, codes[1].extension_len);
+    encodeResiduals(vlc, .{ first, second });
+}
+
+/// The MagSgn bits of each quad pair packed into `words`, first quad and
+/// sample 0 lowest, and their count into `row.mag_sgn_length`, a vector of
+/// quads at a time, for a row whose U_q are at most 7: 28 bits a quad. The
+/// value lines run on past the block for whole vectors, where the quads
+/// are empty.
+fn packMagSgnPairs(comptime Magnitude: type, row: QuadRow, top: []const Magnitude, bottom: []const Magnitude, words: []u64, quad_width: usize) void {
+    const lanes = 16;
+    const Bytes = @Vector(lanes, u8);
+    const Lanes = @Vector(lanes, u32);
+    const Shifts = @Vector(lanes, u5);
+    const Values = @Vector(2 * lanes, Magnitude);
+    const Pairs = @Vector(lanes / 2, u64);
+    const one: Lanes = @splat(1);
+    var q: usize = 0;
+    while (q < quad_width) : (q += lanes) {
+        const top_pairs: Values = top[2 * q ..][0 .. 2 * lanes].*;
+        const bottom_pairs: Values = bottom[2 * q ..][0 .. 2 * lanes].*;
+        // Sample j of a quad: left column top and bottom, then right; below
+        // 2^U_q, so 2^7.
+        const samples = [4]Lanes{
+            @truncate(@shuffle(Magnitude, top_pairs, undefined, evenLanes(lanes))),
+            @truncate(@shuffle(Magnitude, bottom_pairs, undefined, evenLanes(lanes))),
+            @truncate(@shuffle(Magnitude, top_pairs, undefined, oddLanes(lanes))),
+            @truncate(@shuffle(Magnitude, bottom_pairs, undefined, oddLanes(lanes))),
+        };
+        const rho: Bytes = row.rho[q..][0..lanes].*;
+        const known: Bytes = row.known[q..][0..lanes].*;
+        const bound: Bytes = row.bound[q..][0..lanes].*;
+        var word: Lanes = @splat(0);
+        var offset: Lanes = @splat(0);
+        inline for (0..4) |j| {
+            const significant = (rho >> @splat(j)) & @as(Bytes, @splat(1));
+            const implicit = (known >> @splat(j)) & @as(Bytes, @splat(1));
+            const n: Lanes = (bound - implicit) & (@as(Bytes, @splat(0)) -% significant);
+            word |= (samples[j] & ((one << @as(Shifts, @intCast(n))) - one)) << @as(Shifts, @intCast(offset));
+            offset += n;
+        }
+        const first: Pairs = @shuffle(u32, word, undefined, evenLanes(lanes / 2));
+        const second: Pairs = @shuffle(u32, word, undefined, oddLanes(lanes / 2));
+        const first_length: Pairs = @shuffle(u32, offset, undefined, evenLanes(lanes / 2));
+        const second_length: Pairs = @shuffle(u32, offset, undefined, oddLanes(lanes / 2));
+        words[q / 2 ..][0 .. lanes / 2].* = first | (second << @as(@Vector(lanes / 2, u6), @intCast(first_length)));
+        const lengths: @Vector(lanes / 2, u8) = @intCast(first_length + second_length);
+        row.mag_sgn_length[q / 2 ..][0 .. lanes / 2].* = lengths;
+    }
+}
+
+/// Shuffle masks picking the even and the odd lanes of twice `lanes`.
+fn evenLanes(comptime lanes: usize) @Vector(lanes, i32) {
+    var mask: [lanes]i32 = undefined;
+    for (&mask, 0..) |*index, lane| index.* = @intCast(2 * lane);
+    return mask;
+}
+
+fn oddLanes(comptime lanes: usize) @Vector(lanes, i32) {
+    var mask: [lanes]i32 = undefined;
+    for (&mask, 0..) |*index, lane| index.* = @intCast(2 * lane + 1);
+    return mask;
+}
+
+/// The MagSgn bits of a quad's sample `j`: U_q less an implicit top bit,
+/// none for an insignificant sample.
+inline fn magSgnLength(rho: u4, known: u4, bound: u8, comptime j: u2) u8 {
+    const significant: u8 = (rho >> j) & 1;
+    const implicit: u8 = (known >> j) & 1;
+    return (bound - implicit) & (0 -% significant);
 }
 
 /// Bits gathered least significant first before a writer takes them.
@@ -703,37 +848,42 @@ const UCode = struct {
 
 /// MagSgn bits least significant first; a byte after 0xFF holds seven
 /// (7.1.2). The stream ends padded with ones, without a final 0xFF, which
-/// the decoder supplies. `bytes` is sized for the block in advance.
+/// the decoder supplies. `bytes` is sized for the block in advance, with
+/// eight bytes to spare: the bits go out a whole word at a time.
 const MagSgnWriter = struct {
     bytes: []u8,
     position: usize = 0,
     buffer: u64 = 0,
+    /// Fewer than eight between calls.
     count: u7 = 0,
     last_ff: bool = false,
 
-    /// The low `n` bits of `value`.
+    /// `value` has no bits above the `n <= 56` it codes.
     inline fn put(self: *MagSgnWriter, value: u64, n: u8) void {
-        if (n > 56) return self.putWide(value, n);
-        self.buffer |= (value & ((@as(u64, 1) << @intCast(n)) - 1)) << @intCast(self.count);
+        self.buffer |= value << @intCast(self.count);
         self.count += @intCast(n);
-        // Four bytes at once when none of the first three is 0xFF, so that
-        // none is stuffed.
-        if (self.count >= 32 and !self.last_ff) {
-            const word: u32 = @truncate(self.buffer);
-            if (!hasFfInLowThree(word)) {
-                std.mem.writeInt(u32, self.bytes[self.position..][0..4], word, .little);
-                self.position += 4;
-                self.buffer >>= 32;
-                self.count -= 32;
-                self.last_ff = (word >> 24) == 0xff;
-            }
+        const whole: u6 = @intCast(self.count & ~@as(u7, 7));
+        // The whole bytes in one store unless one is 0xFF, which stuffs
+        // the next.
+        const ready = self.buffer & ((@as(u64, 1) << whole) - 1);
+        if (!self.last_ff and !hasFf(ready)) {
+            std.mem.writeInt(u64, self.bytes[self.position..][0..8], self.buffer, .little);
+            self.position += whole >> 3;
+            self.buffer >>= whole;
+            self.count -= whole;
+        } else {
+            while (self.count >= @as(u7, 8) - @intFromBool(self.last_ff)) self.flush();
         }
-        while (self.count >= @as(u7, 8) - @intFromBool(self.last_ff)) self.flush();
     }
 
-    fn putWide(self: *MagSgnWriter, value: u64, n: u8) void {
-        self.put(value & 0xffff_ffff, 32);
-        self.put(value >> 32, n - 32);
+    /// The low `n <= 64` bits of `value`.
+    inline fn putWide(self: *MagSgnWriter, value: u64, n: u8) void {
+        if (n > 32) {
+            self.put(value & 0xffff_ffff, 32);
+            self.put((value >> 32) & ((@as(u64, 1) << @intCast(n - 32)) - 1), n - 32);
+        } else {
+            self.put(value & ((@as(u64, 1) << @intCast(n)) - 1), n);
+        }
     }
 
     inline fn flush(self: *MagSgnWriter) void {
@@ -764,11 +914,11 @@ const MagSgnWriter = struct {
     }
 };
 
-/// Whether any of the three low bytes of `word` is 0xFF.
-inline fn hasFfInLowThree(word: u32) bool {
-    // A byte is 0xFF exactly when adding 1 to it carries out of it.
-    const ones = ~word & 0x00ff_ffff;
-    return ((ones -% 0x0001_0101) & ~ones & 0x0080_8080) != 0;
+/// Whether any byte of `word` is 0xFF.
+inline fn hasFf(word: u64) bool {
+    // A byte is 0xFF exactly when its complement is zero.
+    const ones = ~word;
+    return ((ones -% 0x0101_0101_0101_0101) & ~ones & 0x8080_8080_8080_8080) != 0;
 }
 
 /// encodeMELSym, the run-length coder that `MelDecoder` inverts (7.3.3),
@@ -781,13 +931,13 @@ const MelWriter = struct {
     run: u32 = 0,
     k: u8 = 0,
 
-    fn emit(self: *MelWriter, bit: u1) void {
+    inline fn emit(self: *MelWriter, bit: u1) void {
         self.current = (self.current << 1) | bit;
         self.remaining -= 1;
         if (self.remaining == 0) self.flush();
     }
 
-    fn flush(self: *MelWriter) void {
+    inline fn flush(self: *MelWriter) void {
         self.bytes[self.position] = self.current;
         self.position += 1;
         self.remaining = if (self.current == 0xff) 7 else 8;
@@ -808,7 +958,7 @@ const MelWriter = struct {
         self.emitRun(exponent);
     }
 
-    fn emitRun(self: *MelWriter, exponent: u8) void {
+    inline fn emitRun(self: *MelWriter, exponent: u8) void {
         self.emit(0);
         var bit = exponent;
         while (bit > 0) {
@@ -823,11 +973,13 @@ const MelWriter = struct {
 /// VLC bits least significant first into bytes stored from the end of
 /// `bytes` backward (7.1.4): the first byte is the one whose twelve Scup
 /// bits read as ones, and after a byte above 0x8F a byte whose seven low
-/// bits are all set takes only those seven.
+/// bits are all set takes only those seven. Eight bytes before the stream
+/// stay spare: the bits go out a whole word at a time.
 const VlcWriter = struct {
     bytes: []u8,
     written: usize,
     buffer: u64,
+    /// Fewer than eight between calls.
     count: u7,
     last_above_8f: bool,
 
@@ -840,6 +992,26 @@ const VlcWriter = struct {
     inline fn put(self: *VlcWriter, value: u64, n: u8) void {
         self.buffer |= value << @intCast(self.count);
         self.count += @intCast(n);
+        const whole: u6 = @intCast(self.count & ~@as(u7, 7));
+        // The whole bytes in one store unless one has its seven low bits
+        // set, the only kind that can be stuffed; seven pending bits that
+        // will be wait for the next call or `settle`.
+        const ready = (self.buffer | 0x8080_8080_8080_8080) & ((@as(u64, 1) << whole) - 1);
+        if (!hasFf(ready)) {
+            const end = self.bytes.len - self.written;
+            std.mem.writeInt(u64, self.bytes[end - 8 ..][0..8], self.buffer, .big);
+            self.written += whole >> 3;
+            const last: u8 = @truncate(self.buffer >> (whole -% 8));
+            self.last_above_8f = if (whole != 0) last > 0x8f else self.last_above_8f;
+            self.buffer >>= whole;
+            self.count -= whole;
+        } else {
+            self.settle();
+        }
+    }
+
+    /// Writes every byte the pending bits complete.
+    inline fn settle(self: *VlcWriter) void {
         while (true) {
             if (self.last_above_8f) {
                 if (self.count < 7) return;

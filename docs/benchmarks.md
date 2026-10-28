@@ -46,6 +46,43 @@ On Windows, the equivalent harness can include the irreversible profile:
   -OutDir .\zig-out\bench-compare -Runs 8 -Warmup 2 -Threads 16 -IncludeLossy
 ```
 
+## 2026-10-28: Intel Core i5-14500, HT word writers and vector MagSgn
+
+Base `17f9a5d`, `bench-rgb-2048.tif`, ReleaseFast, interleaved rounds (17),
+medians of `--timings`:
+
+| Encode | Threads | Block payload | Total |
+| --- | --- | --- | --- |
+| lossless `--ht` | 1 | 54.7 -> 29.4 ms | 89.8 -> 65.0 ms |
+| lossless `--ht` | 20 | 9.61 -> 7.07 ms | 27.2 -> 24.9 ms |
+
+Kakadu `Cmodes=HT` takes about 25 ms at twenty threads on this host.
+Codestreams byte-identical to `17f9a5d` on 332 encodes (eight TIFF
+fixtures and the bench image under twelve option sets, Part 1 and HT, and
+the 23 T.803 ZRAW layouts plain, tiled with layers, and with 8x8 blocks
+without MCT). Time inside the HT block coder (`ht.Encoder.encode`), which
+was 47 ms of the 55 ms block payload, in the order kept:
+
+- MagSgn and VLC writers storing a whole 64-bit word per call, the bytes
+  they complete counted from the bit count, with byte-by-byte stuffing only
+  when a completed byte is 0xFF (MagSgn) or has its seven low bits set
+  (VLC); no branch on whether a quad is significant or whether a pair codes
+  a codeword (47 -> 37 ms);
+- MagSgn bits of a whole quad row packed after its codewords, a quad pair
+  per word in 32-bit vector lanes when the row's U_q are at most 7, one
+  writer call per pair (37 -> 32 ms; packing quads in 64-bit lanes for any
+  row measured no gain over scalar, AVX2 lacking 64-bit min and compares);
+- the CxtVLC table index (rho, u_off, implicit-bit pattern, above-line
+  context) computed with the rest of `QuadRow`, the left neighbour's part
+  added from a 16-entry table, the initial and other rows as separate loops,
+  and both residuals below 16 coded from one 256-entry table (32 -> 28.8 ms);
+- the next quad row's samples prefetched, rows being a band stride apart
+  (28.8 -> about 26 ms; prefetching the whole block up front was slower).
+
+Of the 29 ms of block payload left at one thread, about 26 is the block
+coder: line analysis 7, quad-row analysis 2.5, codewords about 10, MagSgn
+about 7; the rest is the copy of each segment out of the coder's scratch.
+
 ## 2026-10-28: Intel Core i5-14500, HT quad rows and one-pass forward 5/3
 
 Base `93e2cfe`, `bench-rgb-2048.tif`, ReleaseFast, interleaved rounds

@@ -5,6 +5,18 @@ entries are grouped by development milestone rather than semantic version.
 
 ## Unreleased
 
+### Faster HT Block Coding (0.3.0 line)
+
+- The HT encoder's MagSgn and VLC writers store a whole 64-bit word per
+  call and stuff byte by byte only where a completed byte needs it; a quad
+  row's MagSgn bits are packed after its codewords, a quad pair per word in
+  vector lanes; each quad's CxtVLC table index comes precomputed with the
+  row's other quad data; and the next quad row's samples are prefetched.
+  Single-threaded block coding of the 2048x2048 RGB image drops from 55 to
+  29 ms (total 90 -> 65 ms), and at twenty threads the whole encode takes
+  25 ms (was 27), level with Kakadu on this host. Output is byte-identical
+  (332 encodes compared).
+
 ### Faster Forward 5/3 And HT Quad Rows (0.3.0 line)
 
 - The forward 5/3 transform's vertical step lifts each column strip in one
