@@ -2851,6 +2851,16 @@ test "CLI extension dispatch recognizes raw codestream PGX diagnostics" {
     try std.testing.expect(cli_dispatch.inferConversionExtensions(".j2k", ".tif") == null);
 }
 
+test "CLI extension dispatch decodes JP2 and JPH files to TIFF" {
+    for ([_][]const u8{ ".jp2", ".JP2", ".jph", ".JPH" }) |input| {
+        try std.testing.expectEqual(
+            cli_dispatch.InferredConversion.jp2_to_tiff,
+            cli_dispatch.inferConversionExtensions(input, ".tif").?,
+        );
+    }
+    try std.testing.expect(cli_dispatch.inferConversionExtensions(".tif", ".jph") == null);
+}
+
 test "CLI extension dispatch recognizes exact all-component ZRAW diagnostics" {
     try std.testing.expectEqual(
         cli_dispatch.InferredConversion.j2k_to_zraw,
@@ -14731,6 +14741,137 @@ test "Kakadu HTJ2K fixture decodes exactly on every decode path" {
     for (planar.planes, 0..) |plane, component| {
         for (plane, 0..) |sample, index| {
             try std.testing.expectEqual(Expected.sample(component, index / width), sample);
+        }
+    }
+}
+
+/// A JP2-family file around `codestream`: the signature, a file type box
+/// of `brand` (also its only compatibility entry), a header box whose image
+/// header takes its geometry from the SIZ marker, with UnkC `unknown` and
+/// an optional colour box payload, then the codestream.
+fn jp2FamilyFileForTest(
+    allocator: std.mem.Allocator,
+    brand: *const [4]u8,
+    unknown: bool,
+    colour: ?[]const u8,
+    codestream_bytes: []const u8,
+) ![]u8 {
+    const readU32 = struct {
+        fn at(bytes: []const u8, offset: usize) u32 {
+            return std.mem.readInt(u32, bytes[offset..][0..4], .big);
+        }
+    }.at;
+    const width = readU32(codestream_bytes, 8) - readU32(codestream_bytes, 16);
+    const height = readU32(codestream_bytes, 12) - readU32(codestream_bytes, 20);
+    const components = std.mem.readInt(u16, codestream_bytes[40..42], .big);
+    const ssiz = codestream_bytes[42];
+
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(allocator);
+    const Box = struct {
+        fn header(list: *std.ArrayList(u8), gpa: std.mem.Allocator, kind: *const [4]u8, length: usize) !void {
+            var bytes: [8]u8 = undefined;
+            std.mem.writeInt(u32, bytes[0..4], @intCast(8 + length), .big);
+            @memcpy(bytes[4..8], kind);
+            try list.appendSlice(gpa, &bytes);
+        }
+    };
+    try out.appendSlice(allocator, &.{ 0, 0, 0, 12, 'j', 'P', ' ', ' ', 0x0d, 0x0a, 0x87, 0x0a });
+    try Box.header(&out, allocator, "ftyp", 12);
+    try out.appendSlice(allocator, brand);
+    try out.appendSlice(allocator, &.{ 0, 0, 0, 0 });
+    try out.appendSlice(allocator, brand);
+    const colour_box: usize = if (colour) |payload| 8 + payload.len else 0;
+    try Box.header(&out, allocator, "jp2h", 22 + colour_box);
+    try Box.header(&out, allocator, "ihdr", 14);
+    var ihdr: [14]u8 = undefined;
+    std.mem.writeInt(u32, ihdr[0..4], height, .big);
+    std.mem.writeInt(u32, ihdr[4..8], width, .big);
+    std.mem.writeInt(u16, ihdr[8..10], components, .big);
+    ihdr[10] = ssiz;
+    ihdr[11] = 7;
+    ihdr[12] = @intFromBool(unknown);
+    ihdr[13] = 0;
+    try out.appendSlice(allocator, &ihdr);
+    if (colour) |payload| {
+        try Box.header(&out, allocator, "colr", payload.len);
+        try out.appendSlice(allocator, payload);
+    }
+    try Box.header(&out, allocator, "jp2c", codestream_bytes.len);
+    try out.appendSlice(allocator, codestream_bytes);
+    return out.toOwnedSlice(allocator);
+}
+
+test "JPH files wrap HTJ2K codestreams with T.814 Annex D colour boxes" {
+    const allocator = std.testing.allocator;
+    // Kakadu 8.4.1 `kdu_compress -o t.jph Creversible=yes Cmodes=HT` of a
+    // 32x24 RGB gradient: brand `jph `, an sRGB colour box, and a contiguous
+    // codestream box running to the end of the file (length 0).
+    const kakadu = @embedFile("testdata/kakadu-ht-rgb.jph");
+    const info = try jp2.parseInfo(allocator, kakadu);
+    try std.testing.expect(info.high_throughput);
+    try std.testing.expectEqual(jp2.ColorSpace.srgb, info.color_space);
+    var decoded = try codestream.decodeLosslessNativeWithOptions(allocator, try jp2.extractCodestream(allocator, kakadu), .{}, .{});
+    defer decoded.deinit();
+    for (decoded.planes, 0..) |plane, component| {
+        for (plane.samples, 0..) |sample, index| {
+            const x = index % 32;
+            const y = index / 32;
+            const expected: i64 = switch (component) {
+                0 => @intCast((x * 8) & 255),
+                1 => @intCast((y * 10) & 255),
+                else => @intCast(((x + y) * 5) & 255),
+            };
+            try std.testing.expectEqual(expected, sample);
+        }
+    }
+
+    const ht_stream = @embedFile("testdata/kakadu-ht-rgb.j2c");
+    const part1 = @embedFile("testdata/kakadu-reduced-edge-column-rct.j2c");
+    var icc_rgb: [3 + 128]u8 = @splat(0);
+    icc_rgb[0] = 3;
+    @memcpy(icc_rgb[3 + 16 ..][0..4], "RGB ");
+    var icc_cmyk = icc_rgb;
+    @memcpy(icc_cmyk[3 + 16 ..][0..4], "CMYK");
+    const Case = struct {
+        brand: *const [4]u8 = "jph ",
+        unknown: bool = false,
+        colour: ?[]const u8,
+        stream: []const u8,
+        expected: anyerror!jp2.ColorSpace,
+    };
+    const cases = [_]Case{
+        // METH 5: H.273 BT.709 primaries, sRGB transfer, and full range are
+        // sRGB with the identity matrix and sYCC with BT.601's; narrow range
+        // and BT.2020 with PQ have no JP2 equivalent.
+        .{ .colour = &.{ 5, 0, 0, 0, 1, 0, 13, 0, 0, 0x80 }, .stream = ht_stream, .expected = .srgb },
+        .{ .colour = &.{ 5, 0, 0, 0, 1, 0, 13, 0, 5, 0x80 }, .stream = ht_stream, .expected = .sycc },
+        .{ .colour = &.{ 5, 0, 0, 0, 1, 0, 13, 0, 0, 0x00 }, .stream = ht_stream, .expected = jp2.Jp2Error.UnsupportedColorSpace },
+        .{ .colour = &.{ 5, 0, 0, 0, 9, 0, 16, 0, 0, 0x80 }, .stream = ht_stream, .expected = jp2.Jp2Error.UnsupportedColorSpace },
+        .{ .colour = &.{ 5, 0, 0, 0, 1, 0, 13, 0, 0, 0x80, 0 }, .stream = ht_stream, .expected = jp2.Jp2Error.InvalidBox },
+        // METH 3: any ICC input profile, here only for grey or RGB data.
+        .{ .colour = &icc_rgb, .stream = ht_stream, .expected = .restricted_icc },
+        .{ .colour = &icc_cmyk, .stream = ht_stream, .expected = jp2.Jp2Error.UnsupportedColorSpace },
+        // Without a colour box the colour space is unspecified when UnkC
+        // says so (D.2), and the box is missing otherwise.
+        .{ .unknown = true, .colour = null, .stream = ht_stream, .expected = jp2.Jp2Error.UnsupportedColorSpace },
+        .{ .colour = null, .stream = ht_stream, .expected = jp2.Jp2Error.MissingRequiredBox },
+        // JP2 holds Part 1 codestreams and JPH HTJ2K ones (D.5).
+        .{ .brand = "jp2 ", .colour = &.{ 1, 0, 0, 0, 0, 0, 16 }, .stream = ht_stream, .expected = jp2.Jp2Error.UnsupportedProfile },
+        .{ .colour = &.{ 1, 0, 0, 0, 0, 0, 16 }, .stream = part1, .expected = jp2.Jp2Error.InvalidCodestream },
+        .{ .brand = "jp2 ", .colour = &.{ 1, 0, 0, 0, 0, 0, 16 }, .stream = part1, .expected = .srgb },
+    };
+    for (cases) |case| {
+        const file = try jp2FamilyFileForTest(allocator, case.brand, case.unknown, case.colour, case.stream);
+        defer allocator.free(file);
+        if (case.expected) |space| {
+            const parsed = try jp2.parseInfo(allocator, file);
+            try std.testing.expectEqual(space, parsed.color_space);
+            const profile = try jp2.extractIccProfile(allocator, file);
+            defer if (profile) |bytes| allocator.free(bytes);
+            try std.testing.expectEqual(space == .restricted_icc, profile != null);
+        } else |err| {
+            try std.testing.expectError(err, jp2.parseInfo(allocator, file));
         }
     }
 }

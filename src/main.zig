@@ -2179,7 +2179,7 @@ fn usage() void {
         \\  z2000 <input.jpg> <output.jp2> [options]   (shorthand for jpeg-to-jp2)
         \\  z2000 <input.dng> <output.jp2> [options]   (shorthand for dng-to-jp2)
         \\  z2000 <input.exr> <output.jp2> [options]   (shorthand for exr-to-jp2)
-        \\  z2000 <input.jp2> <output.tif> [options]   (shorthand for decode-temp-jp2)
+        \\  z2000 <input.jp2|input.jph> <output.tif> [options]   (shorthand for decode-temp-jp2)
         \\  z2000 <input.j2k> <output.pgx> [options]   (raw codestream component diagnostic)
         \\  z2000 <input.j2k> <output.zraw> [options]  (exact all-component raw diagnostic)
         \\  z2000 *.tif .jp2 [options]                  (non-recursive batch; supports * and ?)
@@ -2188,7 +2188,7 @@ fn usage() void {
         \\  z2000 *.jpg .jp2 [options]                  (non-recursive JPEG batch)
         \\  z2000 *.dng .jp2 [options]                  (non-recursive DNG batch)
         \\  z2000 *.exr .jp2 [options]                  (non-recursive OpenEXR batch)
-        \\  z2000 *.jp2 .tif [options]                  (non-recursive reverse batch)
+        \\  z2000 *.jp2 .tif [options]                  (non-recursive reverse batch; also *.jph)
         \\  z2000 *.j2k .pgx [options]                  (non-recursive raw component batch)
         \\  z2000 *.j2k .zraw [options]                 (non-recursive exact all-component batch)
         \\  z2000 encode <input.pgm> <output.z2000> [--wavelet 5-3|9-7] [--levels N] [--quant STEP]

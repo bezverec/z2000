@@ -30,7 +30,8 @@ pub fn inferConversionExtensions(input_ext: []const u8, output_ext: []const u8) 
     const input_is_jpeg = std.ascii.eqlIgnoreCase(input_ext, ".jpg") or std.ascii.eqlIgnoreCase(input_ext, ".jpeg");
     const input_is_dng = std.ascii.eqlIgnoreCase(input_ext, ".dng");
     const input_is_exr = std.ascii.eqlIgnoreCase(input_ext, ".exr");
-    const input_is_jp2 = std.ascii.eqlIgnoreCase(input_ext, ".jp2");
+    // JPH (T.814 Annex D) is JP2 around an HTJ2K codestream.
+    const input_is_jp2 = std.ascii.eqlIgnoreCase(input_ext, ".jp2") or std.ascii.eqlIgnoreCase(input_ext, ".jph");
     const input_is_j2k = std.ascii.eqlIgnoreCase(input_ext, ".j2k") or std.ascii.eqlIgnoreCase(input_ext, ".j2c");
     const output_is_tiff = std.ascii.eqlIgnoreCase(output_ext, ".tif") or std.ascii.eqlIgnoreCase(output_ext, ".tiff");
     const output_is_jp2 = std.ascii.eqlIgnoreCase(output_ext, ".jp2");

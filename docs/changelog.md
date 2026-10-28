@@ -5,6 +5,33 @@ entries are grouped by development milestone rather than semantic version.
 
 ## Unreleased
 
+### JPH Files Decode (0.3.0 line)
+
+- JPH files (ITU-T T.814 Annex D: brand `jph `, an HTJ2K codestream) are
+  accepted wherever JP2 files are: `decode-temp-jp2`, the `z2000 x.jph
+  y.tif` shorthand and `*.jph .tif` batches, and the JP2 parsing API
+  (`Info.high_throughput`). A JPH file must carry a Part 15 codestream and
+  a JP2 file a Part 1 one (D.5); the wrapper audit accepts CPF and the HT
+  code-block style bits when the CAP declares Part 15. The JPH colour
+  methods are read: METH 3 (any ICC) when its profile describes grey or
+  RGB data, preserved like a restricted ICC profile, and METH 5 (H.273
+  code points) when they name sRGB/sGrey (BT.709 primaries, sRGB transfer,
+  identity matrix, full range) or sYCC (BT.601 matrix). Other code points,
+  other ICC data spaces, and a file without a colour box whose UnkC leaves
+  the colour space unspecified (D.2) fail closed as `UnsupportedColorSpace`.
+- Evidence: 16 of the 20 WG1 JPH conformance files render, and the
+  renderings of `file1`, `file4` to `file8` are identical to Kakadu
+  8.4.1's and Grok 20.4.19's (`file9`'s palette to Kakadu's; Kakadu writes
+  only Y and Grok raw YCbCr for the sYCC 4:2:0 `file3`, so z2000's
+  existing sYCC conversion is not cross-checked there). `file2`'s channel
+  definition maps components to other colours, which the JP2 path does not
+  render for JP2 either (`UnsupportedProfile`); `file10` has five
+  components, no colour box, and application-defined channels
+  (`UnsupportedColorSpace`), though its codestream decodes exactly as its
+  published references. The 20 files join the corpus as optional entries
+  and a Kakadu JPH file as a committed one; a unit test builds JPH files
+  around the committed HT codestream for each colour rule.
+
 ### HTJ2K Codestreams Decode (0.3.0 line)
 
 - Raw HTJ2K (ITU-T T.814 | ISO/IEC 15444-15) codestreams now decode on

@@ -5335,6 +5335,25 @@
       "expected_native_sha256": "579cee90d11a570bb337186303dec4b682e6ad7e73c97db95f787e9920966e0e"
     },
     {
+      "id": "kakadu-jph-rgb",
+      "path": "src/testdata/kakadu-ht-rgb.jph",
+      "availability": "committed",
+      "format": "jp2",
+      "decoder": "native",
+      "sha256": "47f7b3d22c952ac42ba603142636032695fb4ef6bd2fbb02adcc26c0360e7daa",
+      "source": {
+        "producer": "Kakadu demo applications",
+        "version": "8.4.1",
+        "origin": "locally generated 32x24 RGB gradient; kdu_compress -o t.jph Creversible=yes Cmodes=HT -num_threads 0",
+        "license": "project-generated synthetic test fixture under the repository license",
+        "redistribution": "committed file; Kakadu application not redistributed"
+      },
+      "oracle": "src/tests.zig verifies the exact gradient; brand jph, sRGB colour box, codestream box to the end of the file",
+      "features": ["ht-block-coder", "jp2-core-container", "reversible-53"],
+      "expectation": "decode_pass",
+      "expected_native_sha256": "b35d0942fa5d8aaee188ae8b90b5fdddff44332e78bac4826c771e92e0a0bc93"
+    },
+    {
       "id": "wg1-htj2k-ds0-ht-01-b11",
       "path": "htj2k_bsets_profile0/p0_01_bset/ds0_ht_01_b11.j2k",
       "availability": "optional",
@@ -6477,6 +6496,406 @@
           "max_mse": 0
         }
       ]
+    },
+    {
+      "id": "wg1-jph-file1-b11",
+      "path": "testfiles_jph/file1_b11.jph",
+      "availability": "optional",
+      "root_env": "Z2000_PART4_ROOT",
+      "format": "jp2",
+      "decoder": "native",
+      "sha256": "a496952705d380f3e9f88b6f60798c30f4bb05db920c20b45531b7d882804e10",
+      "source": {
+        "producer": "ITU-T T.814 | ISO/IEC 15444-15 JPH conformance files in the T.803 corpus",
+        "version": "WG1 corpus commit f6b9ede094a0bd6e1e0427e12721e3f3ee1b704b",
+        "origin": "Kakadu HT encode, sRGB, XML boxes, magnitude bound B=11",
+        "license": "JPEG 2000 standard conformance/testing grant in COPYRIGHT.txt; notice retention required",
+        "redistribution": "optional local asset; not redistributed by z2000"
+      },
+      "oracle": "codestream exact against Kakadu 8.4.1 and Grok 20.4.19 on every component; decode-temp-jp2 rendering checked against Kakadu",
+      "features": ["ht-block-coder", "jp2-core-container"],
+      "expectation": "decode_pass",
+      "expected_native_sha256": "f317fb4cd8bf8ad4666d0968a57d7e737bea2254a0ba5358f5d985f14de89a5a"
+    },
+    {
+      "id": "wg1-jph-file1-b12",
+      "path": "testfiles_jph/file1_b12.jph",
+      "availability": "optional",
+      "root_env": "Z2000_PART4_ROOT",
+      "format": "jp2",
+      "decoder": "native",
+      "sha256": "8bf8e9aee043da15e95debf9049e2e371640705d949fe51fb0036fe91aac941f",
+      "source": {
+        "producer": "ITU-T T.814 | ISO/IEC 15444-15 JPH conformance files in the T.803 corpus",
+        "version": "WG1 corpus commit f6b9ede094a0bd6e1e0427e12721e3f3ee1b704b",
+        "origin": "Kakadu HT encode, sRGB, XML boxes, magnitude bound B=12",
+        "license": "JPEG 2000 standard conformance/testing grant in COPYRIGHT.txt; notice retention required",
+        "redistribution": "optional local asset; not redistributed by z2000"
+      },
+      "oracle": "codestream exact against Kakadu 8.4.1 and Grok 20.4.19 on every component; decode-temp-jp2 rendering checked against Kakadu",
+      "features": ["ht-block-coder", "jp2-core-container"],
+      "expectation": "decode_pass",
+      "expected_native_sha256": "03a8a1a3eec32a8719fff8d876967d76775fd353ef6387babd3da0cebe7c2237"
+    },
+    {
+      "id": "wg1-jph-file2-b11",
+      "path": "testfiles_jph/file2_b11.jph",
+      "availability": "optional",
+      "root_env": "Z2000_PART4_ROOT",
+      "format": "jp2",
+      "decoder": "native",
+      "sha256": "2633ed1d831e80e9f849915436a4a9439f60eaa0d6b843523085704ce2cc6d25",
+      "source": {
+        "producer": "ITU-T T.814 | ISO/IEC 15444-15 JPH conformance files in the T.803 corpus",
+        "version": "WG1 corpus commit f6b9ede094a0bd6e1e0427e12721e3f3ee1b704b",
+        "origin": "Kakadu HT encode, sRGB with a channel definition that reorders the colours, magnitude bound B=11",
+        "license": "JPEG 2000 standard conformance/testing grant in COPYRIGHT.txt; notice retention required",
+        "redistribution": "optional local asset; not redistributed by z2000"
+      },
+      "oracle": "a channel definition that maps codestream components to other colours is not rendered by the JP2 path (as for JP2); its codestream decodes exactly as Kakadu 8.4.1 decodes it",
+      "features": ["ht-block-coder", "jp2-core-container"],
+      "expectation": "fail_closed",
+      "expected_error": "UnsupportedProfile"
+    },
+    {
+      "id": "wg1-jph-file2-b12",
+      "path": "testfiles_jph/file2_b12.jph",
+      "availability": "optional",
+      "root_env": "Z2000_PART4_ROOT",
+      "format": "jp2",
+      "decoder": "native",
+      "sha256": "8b10fd5861ff8c4f76f070597b002d5789392b988006ff1fb358c4aa1a422218",
+      "source": {
+        "producer": "ITU-T T.814 | ISO/IEC 15444-15 JPH conformance files in the T.803 corpus",
+        "version": "WG1 corpus commit f6b9ede094a0bd6e1e0427e12721e3f3ee1b704b",
+        "origin": "Kakadu HT encode, sRGB with a channel definition that reorders the colours, magnitude bound B=12",
+        "license": "JPEG 2000 standard conformance/testing grant in COPYRIGHT.txt; notice retention required",
+        "redistribution": "optional local asset; not redistributed by z2000"
+      },
+      "oracle": "a channel definition that maps codestream components to other colours is not rendered by the JP2 path (as for JP2); its codestream decodes exactly as Kakadu 8.4.1 decodes it",
+      "features": ["ht-block-coder", "jp2-core-container"],
+      "expectation": "fail_closed",
+      "expected_error": "UnsupportedProfile"
+    },
+    {
+      "id": "wg1-jph-file3-b11",
+      "path": "testfiles_jph/file3_b11.jph",
+      "availability": "optional",
+      "root_env": "Z2000_PART4_ROOT",
+      "format": "jp2",
+      "decoder": "native",
+      "sha256": "f0cd82435088e3c8b86711319a19cc317790eef123a34a9a48d076b3836265ae",
+      "source": {
+        "producer": "ITU-T T.814 | ISO/IEC 15444-15 JPH conformance files in the T.803 corpus",
+        "version": "WG1 corpus commit f6b9ede094a0bd6e1e0427e12721e3f3ee1b704b",
+        "origin": "Kakadu HT encode, sYCC 4:2:0, magnitude bound B=11",
+        "license": "JPEG 2000 standard conformance/testing grant in COPYRIGHT.txt; notice retention required",
+        "redistribution": "optional local asset; not redistributed by z2000"
+      },
+      "oracle": "codestream exact against Kakadu 8.4.1 and Grok 20.4.19 on every component; decode-temp-jp2 rendering checked against Kakadu",
+      "features": ["ht-block-coder", "jp2-core-container"],
+      "expectation": "decode_pass",
+      "expected_native_sha256": "6a7ef078a5e614435b1b05d1271c5f0247e66ac7948b606228cd97a267fb5cfc"
+    },
+    {
+      "id": "wg1-jph-file3-b12",
+      "path": "testfiles_jph/file3_b12.jph",
+      "availability": "optional",
+      "root_env": "Z2000_PART4_ROOT",
+      "format": "jp2",
+      "decoder": "native",
+      "sha256": "2bbbe77748a9e2e7e4307b0641cb80875f355c3dfceab814f404a872f3370ea9",
+      "source": {
+        "producer": "ITU-T T.814 | ISO/IEC 15444-15 JPH conformance files in the T.803 corpus",
+        "version": "WG1 corpus commit f6b9ede094a0bd6e1e0427e12721e3f3ee1b704b",
+        "origin": "Kakadu HT encode, sYCC 4:2:0, magnitude bound B=12",
+        "license": "JPEG 2000 standard conformance/testing grant in COPYRIGHT.txt; notice retention required",
+        "redistribution": "optional local asset; not redistributed by z2000"
+      },
+      "oracle": "codestream exact against Kakadu 8.4.1 and Grok 20.4.19 on every component; decode-temp-jp2 rendering checked against Kakadu",
+      "features": ["ht-block-coder", "jp2-core-container"],
+      "expectation": "decode_pass",
+      "expected_native_sha256": "7d0b94e3c77cca1bbc4a8d47254b01aa87b8e3be5bc3c7057ab6cea66aae85f0"
+    },
+    {
+      "id": "wg1-jph-file4-b11",
+      "path": "testfiles_jph/file4_b11.jph",
+      "availability": "optional",
+      "root_env": "Z2000_PART4_ROOT",
+      "format": "jp2",
+      "decoder": "native",
+      "sha256": "a278deaf707ece38a995f87991bce80048ec50a2f053ac9eb19eba624009c953",
+      "source": {
+        "producer": "ITU-T T.814 | ISO/IEC 15444-15 JPH conformance files in the T.803 corpus",
+        "version": "WG1 corpus commit f6b9ede094a0bd6e1e0427e12721e3f3ee1b704b",
+        "origin": "Kakadu HT encode, greyscale, magnitude bound B=11",
+        "license": "JPEG 2000 standard conformance/testing grant in COPYRIGHT.txt; notice retention required",
+        "redistribution": "optional local asset; not redistributed by z2000"
+      },
+      "oracle": "codestream exact against Kakadu 8.4.1 and Grok 20.4.19 on every component; decode-temp-jp2 rendering checked against Kakadu",
+      "features": ["ht-block-coder", "jp2-core-container"],
+      "expectation": "decode_pass",
+      "expected_native_sha256": "784fbe6a4d865897a05968c683dffcc26e15c2f28ece193e3729ca1007a02bca"
+    },
+    {
+      "id": "wg1-jph-file4-b12",
+      "path": "testfiles_jph/file4_b12.jph",
+      "availability": "optional",
+      "root_env": "Z2000_PART4_ROOT",
+      "format": "jp2",
+      "decoder": "native",
+      "sha256": "a0c6bea72246a0ca1c9627cba9baa075da23ed3c81f3a4159918e2620b0b328e",
+      "source": {
+        "producer": "ITU-T T.814 | ISO/IEC 15444-15 JPH conformance files in the T.803 corpus",
+        "version": "WG1 corpus commit f6b9ede094a0bd6e1e0427e12721e3f3ee1b704b",
+        "origin": "Kakadu HT encode, greyscale, magnitude bound B=12",
+        "license": "JPEG 2000 standard conformance/testing grant in COPYRIGHT.txt; notice retention required",
+        "redistribution": "optional local asset; not redistributed by z2000"
+      },
+      "oracle": "codestream exact against Kakadu 8.4.1 and Grok 20.4.19 on every component; decode-temp-jp2 rendering checked against Kakadu",
+      "features": ["ht-block-coder", "jp2-core-container"],
+      "expectation": "decode_pass",
+      "expected_native_sha256": "0ab4ec9ff9ae24fd08eee41da05dd03791acd95aba7033d5a3e97e7334567d24"
+    },
+    {
+      "id": "wg1-jph-file5-b11",
+      "path": "testfiles_jph/file5_b11.jph",
+      "availability": "optional",
+      "root_env": "Z2000_PART4_ROOT",
+      "format": "jp2",
+      "decoder": "native",
+      "sha256": "f75db93732731cc3d2351b75de088d87cf98ea6ed91c8d393d51a117ad65b6b6",
+      "source": {
+        "producer": "ITU-T T.814 | ISO/IEC 15444-15 JPH conformance files in the T.803 corpus",
+        "version": "WG1 corpus commit f6b9ede094a0bd6e1e0427e12721e3f3ee1b704b",
+        "origin": "Kakadu HT encode, restricted ICC RGB, magnitude bound B=11",
+        "license": "JPEG 2000 standard conformance/testing grant in COPYRIGHT.txt; notice retention required",
+        "redistribution": "optional local asset; not redistributed by z2000"
+      },
+      "oracle": "codestream exact against Kakadu 8.4.1 and Grok 20.4.19 on every component; decode-temp-jp2 rendering checked against Kakadu",
+      "features": ["ht-block-coder", "jp2-core-container"],
+      "expectation": "decode_pass",
+      "expected_native_sha256": "f3f5c3c0bc8baea04a2073c0918af8c0f4f327ef3cd077a782778b5f19c5e2fa"
+    },
+    {
+      "id": "wg1-jph-file5-b12",
+      "path": "testfiles_jph/file5_b12.jph",
+      "availability": "optional",
+      "root_env": "Z2000_PART4_ROOT",
+      "format": "jp2",
+      "decoder": "native",
+      "sha256": "f1b91a88b8bce719e7d41649b71dd33fc8d85d7f61461fd191a967e3549a5c92",
+      "source": {
+        "producer": "ITU-T T.814 | ISO/IEC 15444-15 JPH conformance files in the T.803 corpus",
+        "version": "WG1 corpus commit f6b9ede094a0bd6e1e0427e12721e3f3ee1b704b",
+        "origin": "Kakadu HT encode, restricted ICC RGB, magnitude bound B=12",
+        "license": "JPEG 2000 standard conformance/testing grant in COPYRIGHT.txt; notice retention required",
+        "redistribution": "optional local asset; not redistributed by z2000"
+      },
+      "oracle": "codestream exact against Kakadu 8.4.1 and Grok 20.4.19 on every component; decode-temp-jp2 rendering checked against Kakadu",
+      "features": ["ht-block-coder", "jp2-core-container"],
+      "expectation": "decode_pass",
+      "expected_native_sha256": "fb6be694a9570846577b2e8e6f2a893d44c5ba5653b580939839b1d8577609a2"
+    },
+    {
+      "id": "wg1-jph-file6-b11",
+      "path": "testfiles_jph/file6_b11.jph",
+      "availability": "optional",
+      "root_env": "Z2000_PART4_ROOT",
+      "format": "jp2",
+      "decoder": "native",
+      "sha256": "e55e7530e3b3bdd7b1f7d5a7661da0c3182407a214d24cdae5ef1ecc478b3c6e",
+      "source": {
+        "producer": "ITU-T T.814 | ISO/IEC 15444-15 JPH conformance files in the T.803 corpus",
+        "version": "WG1 corpus commit f6b9ede094a0bd6e1e0427e12721e3f3ee1b704b",
+        "origin": "Kakadu HT encode, 12-bit greyscale, magnitude bound B=11",
+        "license": "JPEG 2000 standard conformance/testing grant in COPYRIGHT.txt; notice retention required",
+        "redistribution": "optional local asset; not redistributed by z2000"
+      },
+      "oracle": "codestream exact against Kakadu 8.4.1 and Grok 20.4.19 on every component; decode-temp-jp2 rendering checked against Kakadu",
+      "features": ["ht-block-coder", "jp2-core-container"],
+      "expectation": "decode_pass",
+      "expected_native_sha256": "aa15e1295b05c2c7a5785ca7f74a90a4741b03bee0fcb6a57f4b7909890a13ca"
+    },
+    {
+      "id": "wg1-jph-file6-b15",
+      "path": "testfiles_jph/file6_b15.jph",
+      "availability": "optional",
+      "root_env": "Z2000_PART4_ROOT",
+      "format": "jp2",
+      "decoder": "native",
+      "sha256": "2c25892a9e881b969ea98625386e975a4d7c403851ccf39cb64a03347d3fca12",
+      "source": {
+        "producer": "ITU-T T.814 | ISO/IEC 15444-15 JPH conformance files in the T.803 corpus",
+        "version": "WG1 corpus commit f6b9ede094a0bd6e1e0427e12721e3f3ee1b704b",
+        "origin": "Kakadu HT encode, 12-bit greyscale, magnitude bound B=15",
+        "license": "JPEG 2000 standard conformance/testing grant in COPYRIGHT.txt; notice retention required",
+        "redistribution": "optional local asset; not redistributed by z2000"
+      },
+      "oracle": "codestream exact against Kakadu 8.4.1 and Grok 20.4.19 on every component; decode-temp-jp2 rendering checked against Kakadu",
+      "features": ["ht-block-coder", "jp2-core-container"],
+      "expectation": "decode_pass",
+      "expected_native_sha256": "d02b0ef56c0bbb6f04167a1603f62992765da7e9e784d5c4d726b2ca926be02c"
+    },
+    {
+      "id": "wg1-jph-file7-b11",
+      "path": "testfiles_jph/file7_b11.jph",
+      "availability": "optional",
+      "root_env": "Z2000_PART4_ROOT",
+      "format": "jp2",
+      "decoder": "native",
+      "sha256": "844a21a93d2e6f15b540ef2fe3465bbc149b4d98796b4075a2ac7f0aedd01793",
+      "source": {
+        "producer": "ITU-T T.814 | ISO/IEC 15444-15 JPH conformance files in the T.803 corpus",
+        "version": "WG1 corpus commit f6b9ede094a0bd6e1e0427e12721e3f3ee1b704b",
+        "origin": "Kakadu HT encode, 16-bit restricted ICC RGB, magnitude bound B=11",
+        "license": "JPEG 2000 standard conformance/testing grant in COPYRIGHT.txt; notice retention required",
+        "redistribution": "optional local asset; not redistributed by z2000"
+      },
+      "oracle": "codestream exact against Kakadu 8.4.1 and Grok 20.4.19 on every component; decode-temp-jp2 rendering checked against Kakadu",
+      "features": ["ht-block-coder", "jp2-core-container"],
+      "expectation": "decode_pass",
+      "expected_native_sha256": "9a3d2179da030fd3c772e83d8ea9ac03fd37181466ae6f6bf91512d59ba4d34c"
+    },
+    {
+      "id": "wg1-jph-file7-b15",
+      "path": "testfiles_jph/file7_b15.jph",
+      "availability": "optional",
+      "root_env": "Z2000_PART4_ROOT",
+      "format": "jp2",
+      "decoder": "native",
+      "sha256": "3b8f47b451cac63c09778dfe7829ef890e26dc116a1cd1991999379e3082c22e",
+      "source": {
+        "producer": "ITU-T T.814 | ISO/IEC 15444-15 JPH conformance files in the T.803 corpus",
+        "version": "WG1 corpus commit f6b9ede094a0bd6e1e0427e12721e3f3ee1b704b",
+        "origin": "Kakadu HT encode, 16-bit restricted ICC RGB, magnitude bound B=15",
+        "license": "JPEG 2000 standard conformance/testing grant in COPYRIGHT.txt; notice retention required",
+        "redistribution": "optional local asset; not redistributed by z2000"
+      },
+      "oracle": "codestream exact against Kakadu 8.4.1 and Grok 20.4.19 on every component; decode-temp-jp2 rendering checked against Kakadu",
+      "features": ["ht-block-coder", "jp2-core-container"],
+      "expectation": "decode_pass",
+      "expected_native_sha256": "9eea92e591341b510e87d8751b99070829fe274542d2ca6aecbd227fc3e0ae01"
+    },
+    {
+      "id": "wg1-jph-file7-b19",
+      "path": "testfiles_jph/file7_b19.jph",
+      "availability": "optional",
+      "root_env": "Z2000_PART4_ROOT",
+      "format": "jp2",
+      "decoder": "native",
+      "sha256": "c20643d17d746134c07849c9457102b793858f4794cf2f37a434e25982b5b859",
+      "source": {
+        "producer": "ITU-T T.814 | ISO/IEC 15444-15 JPH conformance files in the T.803 corpus",
+        "version": "WG1 corpus commit f6b9ede094a0bd6e1e0427e12721e3f3ee1b704b",
+        "origin": "Kakadu HT encode, 16-bit restricted ICC RGB, magnitude bound B=19",
+        "license": "JPEG 2000 standard conformance/testing grant in COPYRIGHT.txt; notice retention required",
+        "redistribution": "optional local asset; not redistributed by z2000"
+      },
+      "oracle": "codestream exact against Kakadu 8.4.1 and Grok 20.4.19 on every component; decode-temp-jp2 rendering checked against Kakadu",
+      "features": ["ht-block-coder", "jp2-core-container"],
+      "expectation": "decode_pass",
+      "expected_native_sha256": "63ea45ef06bc295658823a4bcc8093dcf0dee127e97b0717bfbf129f1c5b9d8a"
+    },
+    {
+      "id": "wg1-jph-file8-b11",
+      "path": "testfiles_jph/file8_b11.jph",
+      "availability": "optional",
+      "root_env": "Z2000_PART4_ROOT",
+      "format": "jp2",
+      "decoder": "native",
+      "sha256": "4f5fbe9d74ff3eae9c77efa6cb5d482cbfb8443977918b1e04893f764ead16ee",
+      "source": {
+        "producer": "ITU-T T.814 | ISO/IEC 15444-15 JPH conformance files in the T.803 corpus",
+        "version": "WG1 corpus commit f6b9ede094a0bd6e1e0427e12721e3f3ee1b704b",
+        "origin": "Kakadu HT encode, restricted ICC greyscale, XML boxes, magnitude bound B=11",
+        "license": "JPEG 2000 standard conformance/testing grant in COPYRIGHT.txt; notice retention required",
+        "redistribution": "optional local asset; not redistributed by z2000"
+      },
+      "oracle": "codestream exact against Kakadu 8.4.1 and Grok 20.4.19 on every component; decode-temp-jp2 rendering checked against Kakadu",
+      "features": ["ht-block-coder", "jp2-core-container"],
+      "expectation": "decode_pass",
+      "expected_native_sha256": "d1ccfb24a810278dcd589b8158b063b06f1af2b522612f095f7c6823a6edaf3e"
+    },
+    {
+      "id": "wg1-jph-file9-b11",
+      "path": "testfiles_jph/file9_b11.jph",
+      "availability": "optional",
+      "root_env": "Z2000_PART4_ROOT",
+      "format": "jp2",
+      "decoder": "native",
+      "sha256": "c898f00048917635d28cce9c740db7ada2b9d349e41ff1f4a15d7185445a57f6",
+      "source": {
+        "producer": "ITU-T T.814 | ISO/IEC 15444-15 JPH conformance files in the T.803 corpus",
+        "version": "WG1 corpus commit f6b9ede094a0bd6e1e0427e12721e3f3ee1b704b",
+        "origin": "Kakadu HT encode, 256-entry palette, magnitude bound B=11",
+        "license": "JPEG 2000 standard conformance/testing grant in COPYRIGHT.txt; notice retention required",
+        "redistribution": "optional local asset; not redistributed by z2000"
+      },
+      "oracle": "codestream exact against Kakadu 8.4.1 and Grok 20.4.19 on every component; decode-temp-jp2 rendering checked against Kakadu",
+      "features": ["ht-block-coder", "jp2-core-container"],
+      "expectation": "decode_pass",
+      "expected_native_sha256": "4d0e2280e23ed95e377591487f8833eaeec881dc8ff09f4b68bf444c0bb51130"
+    },
+    {
+      "id": "wg1-jph-file9-b12",
+      "path": "testfiles_jph/file9_b12.jph",
+      "availability": "optional",
+      "root_env": "Z2000_PART4_ROOT",
+      "format": "jp2",
+      "decoder": "native",
+      "sha256": "25f2007778caee9599ddbffb7f267cce91c4e9a35bc2d7f8fe1dcac90ab5061e",
+      "source": {
+        "producer": "ITU-T T.814 | ISO/IEC 15444-15 JPH conformance files in the T.803 corpus",
+        "version": "WG1 corpus commit f6b9ede094a0bd6e1e0427e12721e3f3ee1b704b",
+        "origin": "Kakadu HT encode, 256-entry palette, magnitude bound B=12",
+        "license": "JPEG 2000 standard conformance/testing grant in COPYRIGHT.txt; notice retention required",
+        "redistribution": "optional local asset; not redistributed by z2000"
+      },
+      "oracle": "codestream exact against Kakadu 8.4.1 and Grok 20.4.19 on every component; decode-temp-jp2 rendering checked against Kakadu",
+      "features": ["ht-block-coder", "jp2-core-container"],
+      "expectation": "decode_pass",
+      "expected_native_sha256": "f4a9f3992400cd12df69cbaca6589cb5621ece33981d580ca86c45eb5f32a9ef"
+    },
+    {
+      "id": "wg1-jph-file10-b11",
+      "path": "testfiles_jph/file10_b11.jph",
+      "availability": "optional",
+      "root_env": "Z2000_PART4_ROOT",
+      "format": "jp2",
+      "decoder": "native",
+      "sha256": "c08b07807d967be41ed86ca444fed6a3761f6c8c889025f0ff036bdb2555e4ed",
+      "source": {
+        "producer": "ITU-T T.814 | ISO/IEC 15444-15 JPH conformance files in the T.803 corpus",
+        "version": "WG1 corpus commit f6b9ede094a0bd6e1e0427e12721e3f3ee1b704b",
+        "origin": "Kakadu HT encode, five components, no colour box, application-defined channels and alpha, magnitude bound B=11",
+        "license": "JPEG 2000 standard conformance/testing grant in COPYRIGHT.txt; notice retention required",
+        "redistribution": "optional local asset; not redistributed by z2000"
+      },
+      "oracle": "no colour box with UnkC set and application-defined channels: colour space unspecified (T.814 D.2), unsupported for rendering; its codestream decodes exactly as reference_jph/jph_10_*.pgm for B=12",
+      "features": ["ht-block-coder", "jp2-core-container"],
+      "expectation": "fail_closed",
+      "expected_error": "UnsupportedColorSpace"
+    },
+    {
+      "id": "wg1-jph-file10-b12",
+      "path": "testfiles_jph/file10_b12.jph",
+      "availability": "optional",
+      "root_env": "Z2000_PART4_ROOT",
+      "format": "jp2",
+      "decoder": "native",
+      "sha256": "89563adb7883c7d2fae5a8d152241c4c5a854ff88e477ba1fcd25c71841344e0",
+      "source": {
+        "producer": "ITU-T T.814 | ISO/IEC 15444-15 JPH conformance files in the T.803 corpus",
+        "version": "WG1 corpus commit f6b9ede094a0bd6e1e0427e12721e3f3ee1b704b",
+        "origin": "Kakadu HT encode, five components, no colour box, application-defined channels and alpha, magnitude bound B=12",
+        "license": "JPEG 2000 standard conformance/testing grant in COPYRIGHT.txt; notice retention required",
+        "redistribution": "optional local asset; not redistributed by z2000"
+      },
+      "oracle": "no colour box with UnkC set and application-defined channels: colour space unspecified (T.814 D.2), unsupported for rendering; its codestream decodes exactly as reference_jph/jph_10_*.pgm for B=12",
+      "features": ["ht-block-coder", "jp2-core-container"],
+      "expectation": "fail_closed",
+      "expected_error": "UnsupportedColorSpace"
     }
   ]
 }

@@ -1081,8 +1081,9 @@ Kakadu `Cmodes=HT` fixture in the unit tests and the corpus. Done,
 checked against each other. Done, 2026-10-28: the HT block decoder
 (`ht.zig`) and the HT Tier-2 rules decode all 37 non-MIXED WG1 HT
 codestreams and the codestreams of the 20 WG1 JPH files; the changelog has
-the evidence. Next, in order: JPH files (the `jph ` brand and H.273 colour,
-step 3), the HT decoder's speed (the reason HT exists; a straightforward
+the evidence. Done, 2026-10-28: JPH files decode through the JP2 path
+(brand `jph `, METH 3 and METH 5 colour; 16 of the 20 WG1 JPH files).
+Next, in order: the HT decoder's speed (the reason HT exists; a straightforward
 per-sample implementation of clause 7 today, to be measured against Kakadu
 and OpenJPH before any rewrite), MIXED tile-components and MULTIHT, then
 the HT encoder, lossless first.

@@ -81,6 +81,8 @@ pub const Info = struct {
     icc_profile_bytes: usize = 0,
     alpha_mode: ?AlphaMode = null,
     codestream_bytes: usize,
+    /// A JPH file (brand `jph `, ITU-T T.814 Annex D) rather than JP2.
+    high_throughput: bool = false,
 
     pub fn componentBitDepth(self: Info, component: usize) ?u8 {
         if (component >= self.components) return null;
@@ -205,6 +207,9 @@ const uuid_xmp = [16]u8{ 0xbe, 0x7a, 0xcf, 0xcb, 0x97, 0xa9, 0x42, 0xe8, 0x9c, 0
 const uuid_iptc = [16]u8{ 0x33, 0xc7, 0xa4, 0xd2, 0xb8, 0x1d, 0x47, 0x23, 0xa0, 0xba, 0xf1, 0xa3, 0xe0, 0x97, 0xad, 0x38 };
 const uuid_iptc_alternate = [16]u8{ 0x09, 0xa1, 0x4e, 0x97, 0xc0, 0xb4, 0x42, 0xe0, 0xbe, 0xbf, 0x36, 0xdf, 0x6f, 0x0c, 0xe3, 0x6f };
 const brand_jp2 = fourcc("jp2 ");
+/// The JPH file of ITU-T T.814 Annex D: a JP2 file around an HTJ2K
+/// codestream.
+const brand_jph = fourcc("jph ");
 const enum_cs_cmyk: u32 = 12;
 const enum_cs_cielab: u32 = 14;
 const enum_cs_srgb: u32 = 16;
@@ -219,6 +224,7 @@ const marker_cod = 0xff52;
 const marker_coc = 0xff53;
 const marker_tlm = 0xff55;
 const marker_prf = 0xff56;
+const marker_cpf = 0xff59;
 const marker_plm = 0xff57;
 const marker_plt = 0xff58;
 const marker_qcd = 0xff5c;
@@ -242,6 +248,8 @@ const CodestreamShape = struct {
     bits_per_component: u8,
     component_bit_depths: [color.max_components]u8 = @splat(0),
     require_unit_sampling: bool = true,
+    /// A JPH file, which shall carry an HTJ2K codestream (T.814 D.5).
+    high_throughput: bool = false,
 };
 
 const CodestreamGeometry = struct {
@@ -790,7 +798,7 @@ fn parseInfoCapturing(allocator: std.mem.Allocator, bytes: []const u8, audit: ?*
             },
             @backingInt(BoxType.file_type) => {
                 if (box_index != 1 or saw_ftyp) return Jp2Error.InvalidBox;
-                try validateFileTypeBox(box.payload);
+                info.high_throughput = try validateFileTypeBox(box.payload);
                 saw_ftyp = true;
             },
             @backingInt(BoxType.jp2_header) => {
@@ -808,6 +816,7 @@ fn parseInfoCapturing(allocator: std.mem.Allocator, bytes: []const u8, audit: ?*
                     .bits_per_component = info.bits_per_component,
                     .component_bit_depths = info.component_bit_depths,
                     .require_unit_sampling = false,
+                    .high_throughput = info.high_throughput,
                 }, &geometry, audit);
                 info.component_xrsiz = geometry.xrsiz;
                 info.component_yrsiz = geometry.yrsiz;
@@ -1115,6 +1124,16 @@ fn extractIccProfileFromJp2Header(
                 if (box.payload.len <= 3) return Jp2Error.UnsupportedProfile;
                 return try allocator.dupe(u8, box.payload[3..]);
             },
+            3 => if (info.high_throughput and anyIccDataColourSpace(box.payload[3..]) != null) {
+                return try allocator.dupe(u8, box.payload[3..]);
+            },
+            5 => if (info.high_throughput) {
+                if (try parameterizedColourSpace(box.payload)) |enum_cs| {
+                    // The sRGB code points also name sGrey.
+                    if (isSupportedEnumeratedColorSpace(info, enum_cs)) return null;
+                    if (enum_cs == enum_cs_srgb and isSupportedEnumeratedColorSpace(info, enum_cs_grayscale)) return null;
+                }
+            },
             else => {},
         }
     }
@@ -1139,6 +1158,10 @@ fn parseJp2Header(bytes: []const u8, info: *Info) !void {
     var esycc_colr_index: ?usize = null;
     var icc_colr_index: ?usize = null;
     var icc_profile_bytes: usize = 0;
+    // JPH's Any ICC method (METH 3): the data colour space of its profile,
+    // which must match the colour channels.
+    var any_icc_space: ?u32 = null;
+    var colorspace_unknown = false;
     var box_index: usize = 0;
     while (cursor < bytes.len) {
         const box = try nextBox(bytes, &cursor, false);
@@ -1152,14 +1175,15 @@ fn parseJp2Header(bytes: []const u8, info: *Info) !void {
                 info.components = try readU16Be(box.payload, 8);
                 const bpc = box.payload[10];
                 const compression_type = box.payload[11];
-                const colorspace_unknown = box.payload[12];
+                const unknown_flag = box.payload[12];
                 const intellectual_property = box.payload[13];
                 if (info.width == 0 or info.height == 0) return Jp2Error.InvalidBox;
                 // UnkC is a boolean flag (ISO 15444-1 I.5.3.1): 0 = colourspace
                 // known, 1 = unknown. Kakadu writes 1; both are legal.
-                if (compression_type != 7 or colorspace_unknown > 1 or intellectual_property != 0) {
+                if (compression_type != 7 or unknown_flag > 1 or intellectual_property != 0) {
                     return Jp2Error.UnsupportedProfile;
                 }
+                colorspace_unknown = unknown_flag != 0;
                 if (info.components == 0 or info.components > color.max_components) {
                     return Jp2Error.UnsupportedColorSpace;
                 }
@@ -1254,6 +1278,29 @@ fn parseJp2Header(bytes: []const u8, info: *Info) !void {
                             icc_profile_bytes = box.payload.len - 3;
                         }
                     },
+                    // JPH only (T.814 D.4): any input ICC profile, used here
+                    // when it describes grey or RGB data.
+                    3 => if (info.high_throughput and icc_colr_index == null) {
+                        if (anyIccDataColourSpace(box.payload[3..])) |space| {
+                            icc_colr_index = box_index;
+                            icc_profile_bytes = box.payload.len - 3;
+                            any_icc_space = space;
+                        }
+                    },
+                    // JPH only: H.273 code points, used when they name what
+                    // an enumerated JP2 colour space does.
+                    5 => if (info.high_throughput) {
+                        switch ((try parameterizedColourSpace(box.payload)) orelse 0) {
+                            enum_cs_srgb => {
+                                if (srgb_colr_index == null) srgb_colr_index = box_index;
+                                if (grayscale_colr_index == null) grayscale_colr_index = box_index;
+                            },
+                            enum_cs_sycc => if (sycc_colr_index == null) {
+                                sycc_colr_index = box_index;
+                            },
+                            else => {},
+                        }
+                    },
                     else => {},
                 }
             },
@@ -1303,7 +1350,13 @@ fn parseJp2Header(bytes: []const u8, info: *Info) !void {
         }
         box_index += 1;
     }
-    if (!saw_ihdr or !saw_colr) return Jp2Error.MissingRequiredBox;
+    if (!saw_ihdr) return Jp2Error.MissingRequiredBox;
+    if (!saw_colr) {
+        // A JPH file with UnkC set may leave its colour space unspecified
+        // (T.814 D.2); its samples have no colour to render.
+        if (info.high_throughput and colorspace_unknown) return Jp2Error.UnsupportedColorSpace;
+        return Jp2Error.MissingRequiredBox;
+    }
     if (requires_bpcc and !saw_bpcc) return Jp2Error.MissingRequiredBox;
     if (saw_palette != saw_component_mapping) return Jp2Error.MissingRequiredBox;
     if (info.components == 2 and (!saw_channel_definition or info.alpha_mode == null)) {
@@ -1341,6 +1394,11 @@ fn parseJp2Header(bytes: []const u8, info: *Info) !void {
         icc_colr_index
     else
         null;
+    if (any_icc_space) |space| {
+        if (space != (if (color_components == 1) icc_space_gray else icc_space_rgb)) {
+            return Jp2Error.UnsupportedColorSpace;
+        }
+    }
     if (info.has_palette) {
         // The current expansion API produces RGB samples, so a restricted ICC
         // palette profile is deferred until the palette owns colour metadata.
@@ -1369,6 +1427,37 @@ fn parseJp2Header(bytes: []const u8, info: *Info) !void {
     } else {
         return Jp2Error.UnsupportedColorSpace;
     }
+}
+
+const icc_space_gray = fourcc("GRAY");
+const icc_space_rgb = fourcc("RGB ");
+
+/// The data colour space of an ICC profile (ISO 15076-1 7.2.6) when it is
+/// grey or RGB; null for any other or a profile too short for a header.
+fn anyIccDataColourSpace(profile: []const u8) ?u32 {
+    if (profile.len < 128) return null;
+    const space = readU32Be(profile, 16) catch return null;
+    if (space != icc_space_gray and space != icc_space_rgb) return null;
+    return space;
+}
+
+/// The enumerated JP2 colour space that a JPH parameterized colour box
+/// (METH 5, T.814 D.4.3) names in Rec. ITU-T H.273 code points, if any:
+/// BT.709 primaries, the IEC 61966-2-1 transfer, and full range are sRGB
+/// (and sGrey) with the identity matrix and sYCC with a BT.601 matrix.
+fn parameterizedColourSpace(payload: []const u8) !?u32 {
+    if (payload.len != 10) return Jp2Error.InvalidBox;
+    const primaries = try readU16Be(payload, 3);
+    const transfer = try readU16Be(payload, 5);
+    const matrix = try readU16Be(payload, 7);
+    const range = payload[9];
+    if ((range & 0x7f) != 0) return null;
+    if (primaries != 1 or transfer != 13 or (range & 0x80) == 0) return null;
+    return switch (matrix) {
+        0 => enum_cs_srgb,
+        5, 6 => enum_cs_sycc,
+        else => null,
+    };
 }
 
 fn selectEarlierColor(
@@ -1591,19 +1680,24 @@ fn validateResolutionBox(payload: []const u8) !void {
     }
 }
 
-fn validateFileTypeBox(payload: []const u8) !void {
+/// Accepts a JP2 or a JPH (T.814 D.3) file type box, returning whether it
+/// is JPH: BR names the brand, MinV is 0, and the compatibility list names
+/// that brand and no other.
+fn validateFileTypeBox(payload: []const u8) !bool {
     if (payload.len < 8 or (payload.len - 8) % 4 != 0) return Jp2Error.InvalidBox;
-    if (try readU32Be(payload, 0) != brand_jp2) return Jp2Error.UnsupportedProfile;
+    const brand = try readU32Be(payload, 0);
+    if (brand != brand_jp2 and brand != brand_jph) return Jp2Error.UnsupportedProfile;
     if (try readU32Be(payload, 4) != 0) return Jp2Error.UnsupportedProfile;
 
     var compatible = false;
     var cursor: usize = 8;
     while (cursor < payload.len) : (cursor += 4) {
         const compatibility = try readU32Be(payload, cursor);
-        if (compatibility != brand_jp2) return Jp2Error.UnsupportedProfile;
+        if (compatibility != brand) return Jp2Error.UnsupportedProfile;
         compatible = true;
     }
     if (!compatible) return Jp2Error.UnsupportedProfile;
+    return brand == brand_jph;
 }
 
 fn validateCodestreamPayload(
@@ -1708,7 +1802,7 @@ fn validateCodestreamPayloadCapturing(
             geometry.yrsiz[component_index] = yrsiz;
         }
     }
-    try validateMainHeaderMarkers(allocator, payload, segment_end, tile_count, components, rsiz, audit);
+    try validateMainHeaderMarkers(allocator, payload, segment_end, tile_count, components, rsiz, expected.high_throughput, audit);
 }
 
 fn validateMainHeaderMarkers(
@@ -1718,6 +1812,7 @@ fn validateMainHeaderMarkers(
     tile_count: u32,
     components: u16,
     rsiz: u16,
+    high_throughput_file: bool,
     audit: ?*TilePartAudit,
 ) !void {
     var cursor = cursor_after_siz;
@@ -1743,7 +1838,7 @@ fn validateMainHeaderMarkers(
         }
         switch (marker) {
             marker_sot => {
-                profile_state.finish() catch |err| return mapProfileSignalingError(err);
+                try finishProfile(profile_state, high_throughput_file);
                 if (cod_info == null or !saw_qcd) return Jp2Error.InvalidCodestream;
                 const effective_cod = try validateUniformComponentOverrides(
                     &override_state,
@@ -1809,7 +1904,7 @@ fn validateMainHeaderMarkers(
                 saw_poc = true;
             },
             marker_crg => {},
-            marker_cap, marker_prf => {},
+            marker_cap, marker_prf, marker_cpf => {},
             // RGN needs no COD/QCD context (ISO A.6.3); its fields are checked
             // with the other main-header segments.
             marker_rgn => {},
@@ -1827,14 +1922,14 @@ fn validateMainHeaderMarkers(
         if (next > payload.len - 2) return Jp2Error.InvalidCodestream;
         switch (marker) {
             marker_cod => {
-                cod_info = try validateCodSegment(payload, length_offset, marker_length, components);
+                cod_info = try validateCodSegment(payload, length_offset, marker_length, components, profile_state.high_throughput != null);
                 cod_payload = payload[length_offset + 2 .. length_offset + marker_length];
             },
             marker_qcd => {
                 qcd_payload = payload[length_offset + 2 .. length_offset + marker_length];
                 saw_qcd = true;
             },
-            marker_coc => try validateUniformCocSegment(payload, length_offset, marker_length, cod_payload, components, &override_state),
+            marker_coc => try validateUniformCocSegment(payload, length_offset, marker_length, cod_payload, components, &override_state, profile_state.high_throughput != null),
             marker_qcc => try validateQccSegment(payload, length_offset, marker_length, cod_info.?, components, &override_state),
             marker_rgn => try validateRgnSegment(payload, length_offset, marker_length, components),
             marker_crg => {
@@ -1845,6 +1940,8 @@ fn validateMainHeaderMarkers(
                 saw_crg = true;
             },
             marker_cap => profile_state.recordCap(payload[length_offset + 2 .. length_offset + marker_length]) catch |err|
+                return mapProfileSignalingError(err),
+            marker_cpf => profile_signaling.validateCpf(payload[length_offset + 2 .. length_offset + marker_length]) catch |err|
                 return mapProfileSignalingError(err),
             marker_prf => profile_signaling.validatePrf(payload[length_offset + 2 .. length_offset + marker_length]) catch |err|
                 return mapProfileSignalingError(err),
@@ -1860,7 +1957,15 @@ fn validateMainHeaderMarkers(
         }
         cursor = next;
     }
-    profile_state.finish() catch |err| return mapProfileSignalingError(err);
+    try finishProfile(profile_state, high_throughput_file);
+}
+
+/// A JP2 file holds a Part 1 codestream and a JPH file an HTJ2K one (T.814
+/// D.5); the profile gate fails closed on everything else.
+fn finishProfile(state: profile_signaling.State, high_throughput_file: bool) !void {
+    if (!high_throughput_file) return state.finish() catch |err| mapProfileSignalingError(err);
+    const declared = state.finishHighThroughput() catch |err| return mapProfileSignalingError(err);
+    if (declared == null) return Jp2Error.InvalidCodestream;
 }
 
 fn observeProfileMarker(state: *profile_signaling.State, marker: u16) profile_signaling.Error!void {
@@ -2269,7 +2374,7 @@ fn validateRgnSegment(payload: []const u8, length_offset: usize, marker_length: 
     if (style != 0) return Jp2Error.UnsupportedProfile;
 }
 
-fn validateCodSegment(payload: []const u8, length_offset: usize, marker_length: u16, components: u16) !CodSegmentInfo {
+fn validateCodSegment(payload: []const u8, length_offset: usize, marker_length: u16, components: u16, high_throughput: bool) !CodSegmentInfo {
     const scod = payload[length_offset + 2];
     if ((scod & ~@as(u8, 0x07)) != 0) return Jp2Error.InvalidCodestream;
     // All five Part 1 progression orders (LRCP..CPRL, values 0-4) are wired
@@ -2287,7 +2392,7 @@ fn validateCodSegment(payload: []const u8, length_offset: usize, marker_length: 
     const block_width = try codeBlockSizeFromCodExponent(payload[length_offset + 8]);
     const block_height = try codeBlockSizeFromCodExponent(payload[length_offset + 9]);
     if (@as(u32, block_width) * @as(u32, block_height) > 4096) return Jp2Error.InvalidCodestream;
-    try validateCodeBlockStyleByte(payload[length_offset + 10]);
+    try validateCodeBlockStyleByte(payload[length_offset + 10], high_throughput);
     const transform = payload[length_offset + 11];
     if (transform != 0 and transform != 1) return Jp2Error.InvalidCodestream;
     // Scod bit 0 unset (no precinct partition, ISO B.6) is a supported
@@ -2319,7 +2424,15 @@ fn codeBlockSizeFromCodExponent(exponent: u8) !u16 {
     return @as(u16, 1) << @as(u4, @intCast(exponent + 2));
 }
 
-fn validateCodeBlockStyleByte(code_block_style: u8) !void {
+/// `high_throughput`: the main header declares Part 15, whose SPcod bit 6
+/// selects HT code-blocks; the codestream reader checks the rest of T.814
+/// A.4 against Ccap15.
+fn validateCodeBlockStyleByte(code_block_style: u8, high_throughput: bool) !void {
+    if (high_throughput and (code_block_style & 0x40) != 0) {
+        // Bit 7 too mixes the two block coders in one tile-component.
+        if ((code_block_style & ~@as(u8, 0x48)) != 0) return Jp2Error.UnsupportedProfile;
+        return;
+    }
     if ((code_block_style & 0xc0) != 0) return Jp2Error.InvalidCodestream;
     // BYPASS (0x01), RESET (0x02), TERMALL (0x04), CAUSAL (0x08), ERTERM
     // (0x10), and SEGMARK (0x20) all have implemented payload models in
@@ -2339,7 +2452,7 @@ const ComponentOverrideState = struct {
     qcc_first: []const u8 = &.{},
 };
 
-fn validateUniformCocSegment(payload: []const u8, length_offset: usize, marker_length: u16, cod_payload: []const u8, components: u16, state: *ComponentOverrideState) !void {
+fn validateUniformCocSegment(payload: []const u8, length_offset: usize, marker_length: u16, cod_payload: []const u8, components: u16, state: *ComponentOverrideState, high_throughput: bool) !void {
     if (cod_payload.len < 6) return Jp2Error.InvalidCodestream;
     const component = payload[length_offset + 2];
     if (component >= components) return Jp2Error.UnsupportedProfile;
@@ -2347,7 +2460,7 @@ fn validateUniformCocSegment(payload: []const u8, length_offset: usize, marker_l
     if ((scoc & ~@as(u8, 0x01)) != 0) return Jp2Error.InvalidCodestream;
     if ((scoc & 0x01) != (cod_payload[0] & 0x01)) return Jp2Error.UnsupportedProfile;
     const coc_coding = payload[length_offset + 4 .. length_offset + marker_length];
-    try validateCocCodingPayload(coc_coding, scoc);
+    try validateCocCodingPayload(coc_coding, scoc, high_throughput);
     if (state.coc_seen[component]) return Jp2Error.InvalidCodestream;
     state.coc_seen[component] = true;
     const coc_body = payload[length_offset + 3 .. length_offset + marker_length];
@@ -2389,14 +2502,14 @@ fn validateUniformComponentOverrides(
     return effective;
 }
 
-fn validateCocCodingPayload(segment: []const u8, scoc: u8) !void {
+fn validateCocCodingPayload(segment: []const u8, scoc: u8, high_throughput: bool) !void {
     if (segment.len < 5) return Jp2Error.InvalidCodestream;
     const levels = segment[0];
     if (levels > 32) return Jp2Error.InvalidCodestream;
     const block_width = try codeBlockSizeFromCodExponent(segment[1]);
     const block_height = try codeBlockSizeFromCodExponent(segment[2]);
     if (@as(u32, block_width) * @as(u32, block_height) > 4096) return Jp2Error.InvalidCodestream;
-    try validateCodeBlockStyleByte(segment[3]);
+    try validateCodeBlockStyleByte(segment[3], high_throughput);
     const transform = segment[4];
     if (transform != 0 and transform != 1) return Jp2Error.InvalidCodestream;
     const precinct_bytes: usize = if ((scoc & 0x01) != 0) @as(usize, levels) + 1 else 0;

@@ -152,6 +152,9 @@ Order, each step under the normal slice gates:
    so it is no oracle here. Next for this step: decode speed, the point of
    HT, measured against Kakadu and OpenJPH.
 3. JPH file format: the `jph ` brand and parametrized (H.273) colour.
+   Done, 2026-10-28: 16 of the 20 WG1 JPH files render through the JP2
+   path; a channel-reordering `cdef` and an unspecified colour space stay
+   closed, as for JP2.
 4. HT block encoder: lossless first (one Cleanup pass at bit-plane 0), then
    quantization-driven lossy, then `--rates` through complexity control
    (two HT sets generated, at most three passes kept per block).

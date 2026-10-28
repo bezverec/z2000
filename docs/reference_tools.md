@@ -337,6 +337,10 @@ here so they are not rediscovered as new.
 - **Grok 20.4.19 misdecodes the five-component JPH `file10`** (components 0
   to 2 off by up to 255), which Kakadu and z2000 decode exactly as its
   published `reference_jph` images (`file10_b12`).
+- Neither renders the sYCC 4:2:0 JPH `file3` to RGB: `kdu_expand -o x.tif`
+  writes only the Y component (with a colour space warning) and
+  `grk_decompress` an unconverted YCbCr TIFF. Grok also renders the palette
+  JPH `file9` differently from Kakadu and z2000, which agree.
 - On `ds0_ht_06_*` component 0, Kakadu and Grok differ from z2000 by up to
   570, as on the Part 1 `p0_06` the stream was transcoded from: a Maxshift
   ROI with truncated background reconstructs differently, and all three are
