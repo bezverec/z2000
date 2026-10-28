@@ -5,6 +5,26 @@ entries are grouped by development milestone rather than semantic version.
 
 ## Unreleased
 
+### Faster HT Block Decoding (0.3.0 line)
+
+- The HT cleanup pass now decodes straight into the component plane
+  (`ht.Decoder.decodeInto`), interleaves MagSgn decoding with the VLC
+  decoding of each quad pair (the three bit-streams are independent),
+  takes quad contexts and exponent predictors from the neighbouring quads'
+  significance patterns and two guard-padded line buffers, and writes only
+  significant samples into a block cleared up front; the padded scratch
+  planes, the final validation scan, and the copy into the plane are gone.
+  The MagSgn and VLC readers take four bytes at a time when no stuffing bit
+  can fall among them, and the U-VLC prefix comes from one look-ahead.
+  Refinement passes keep their byte-per-sample state, now built only for
+  blocks that have them.
+- Decoded samples unchanged (all HT and JPH corpus entries). On the
+  2048x2048 RGB lossless Kakadu HT encode (`decode-temp-jp2` to TIFF,
+  i5-14500, 11 interleaved rounds): one thread 207.6 -> 138.3 ms, block
+  decoding 141 -> 75 ms (`--timings`), against Kakadu 8.4.1's 67.6 ms for
+  the whole decode; twenty threads 62.1 -> 60.7 ms against Kakadu's 45.0,
+  where the stages around Tier-1 dominate.
+
 ### JPH Files Decode (0.3.0 line)
 
 - JPH files (ITU-T T.814 Annex D: brand `jph `, an HTJ2K codestream) are

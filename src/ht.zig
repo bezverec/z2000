@@ -44,8 +44,7 @@ pub const Block = struct {
 pub const max_cleanup_length: usize = 65534;
 pub const max_refinement_length: usize = 2046;
 
-/// Reusable working memory for one coefficient type; `decode` returns a
-/// view into it that stays valid until the next call.
+/// Reusable working memory for one coefficient type.
 pub fn Decoder(comptime Coefficient: type) type {
     return struct {
         const Self = @This();
@@ -56,17 +55,14 @@ pub fn Decoder(comptime Coefficient: type) type {
         pub const max_bitplanes: u8 = @min(@bitSizeOf(Magnitude), 62);
 
         allocator: std.mem.Allocator,
+        /// `decode`'s output, `width * height` coefficients in raster order.
         coefficients: std.ArrayList(Coefficient) = .empty,
-        /// Cleanup magnitudes mu_n and signs, raster order over the block
-        /// padded to even width and height.
-        magnitudes: std.ArrayList(u64) = .empty,
+        /// SigProp and MagRef state, one byte per sample, for blocks with
+        /// refinement passes.
         flags: std.ArrayList(u8) = .empty,
-        /// Per quad of the current quad row: rho, EMB patterns, U_q.
-        quads: std.ArrayList(Quad) = .empty,
-        /// Significance and exponents E_n of the previous quad row's bottom
-        /// line, one entry per padded column.
-        above_significance: std.ArrayList(u8) = .empty,
-        above_exponents: std.ArrayList(u8) = .empty,
+        /// Significance and exponents E_n of the bottom lines of the previous
+        /// and the current quad row, one zero guard column on either side.
+        lines: std.ArrayList(u8) = .empty,
 
         pub fn init(allocator: std.mem.Allocator) Self {
             return .{ .allocator = allocator };
@@ -74,88 +70,143 @@ pub fn Decoder(comptime Coefficient: type) type {
 
         pub fn deinit(self: *Self) void {
             self.coefficients.deinit(self.allocator);
-            self.magnitudes.deinit(self.allocator);
             self.flags.deinit(self.allocator);
-            self.quads.deinit(self.allocator);
-            self.above_significance.deinit(self.allocator);
-            self.above_exponents.deinit(self.allocator);
+            self.lines.deinit(self.allocator);
             self.* = undefined;
         }
 
-        /// Decode `block` into `width * height` coefficients in raster order.
+        /// Decode `block` into `width * height` coefficients in raster order,
+        /// a view valid until the next call.
         pub fn decode(self: *Self, block: Block) Error![]const Coefficient {
-            if (block.width == 0 or block.height == 0) return Error.InvalidBlock;
+            const area = std.math.mul(usize, block.width, block.height) catch return Error.InvalidBlock;
+            try self.coefficients.resize(self.allocator, area);
+            try self.decodeInto(block, self.coefficients.items, block.width);
+            return self.coefficients.items;
+        }
+
+        /// Decode `block` into the rows of `out`: sample (x, y) lands at
+        /// `out[y * stride + x]`, and every sample of the block is written.
+        pub fn decodeInto(self: *Self, block: Block, out: []Coefficient, stride: usize) Error!void {
+            if (block.width == 0 or block.height == 0 or stride < block.width) return Error.InvalidBlock;
             if (block.magnitude_bitplanes > max_bitplanes or
                 block.cleanup_plane >= block.magnitude_bitplanes)
             {
                 return Error.InvalidBlock;
             }
             if (block.passes > 1 and block.cleanup_plane == 0) return Error.InvalidBlock;
-            const area = std.math.mul(usize, block.width, block.height) catch return Error.InvalidBlock;
-            const quad_width = (block.width + 1) / 2;
-            const quad_height = (block.height + 1) / 2;
-            const padded_width = 2 * quad_width;
-            const padded_area = padded_width * 2 * quad_height;
-            try self.coefficients.resize(self.allocator, area);
-            try self.magnitudes.resize(self.allocator, padded_area);
-            try self.flags.resize(self.allocator, padded_area);
-            try self.quads.resize(self.allocator, quad_width);
-            try self.above_significance.resize(self.allocator, padded_width);
-            try self.above_exponents.resize(self.allocator, padded_width);
-            @memset(self.magnitudes.items, 0);
-            @memset(self.flags.items, 0);
+            const last_row = std.math.mul(usize, block.height - 1, stride) catch return Error.InvalidBlock;
+            if (last_row + block.width > out.len) return Error.InvalidBlock;
             if (block.passes == 0) {
-                @memset(self.coefficients.items, 0);
-                return self.coefficients.items;
+                for (0..block.height) |y| @memset(out[y * stride ..][0..block.width], 0);
+                return;
             }
+            try self.decodeCleanup(block, out, stride);
+            if (block.passes == 1) return;
 
-            try self.decodeCleanup(block, quad_width, quad_height);
-            if (block.passes >= 2) {
-                try checkSegmentBytes(block.refinement, max_refinement_length);
-                var sig_prop = ForwardReader{ .bytes = block.refinement, .synthesize_ff = false };
-                try decodeSigProp(self.flags.items, padded_width, block, &sig_prop);
-                if (block.passes == 3) {
-                    var mag_ref = MagRefReader.init(block.refinement);
-                    decodeMagRef(self.flags.items, padded_width, block, &mag_ref);
+            // The refinement passes need cleanup significance apart from the
+            // samples they make significant, and leave the midpoint to last.
+            const area = block.width * block.height;
+            try self.flags.resize(self.allocator, area);
+            const flags = self.flags.items;
+            for (0..block.height) |y| {
+                for (out[y * stride ..][0..block.width], flags[y * block.width ..][0..block.width]) |value, *flag| {
+                    flag.* = @intFromBool(value != 0);
                 }
             }
-            try self.writeCoefficients(block, padded_width);
-            return self.coefficients.items;
+            try checkSegmentBytes(block.refinement, max_refinement_length);
+            var sig_prop = ForwardReader{ .bytes = block.refinement, .synthesize_ff = false };
+            try decodeSigProp(flags, block.width, block, &sig_prop);
+            if (block.passes == 3) {
+                var mag_ref = MagRefReader.init(block.refinement);
+                decodeMagRef(flags, block.width, block, &mag_ref);
+            }
+            const p = block.cleanup_plane;
+            for (0..block.height) |y| {
+                for (out[y * stride ..][0..block.width], flags[y * block.width ..][0..block.width]) |*value, flag| {
+                    var magnitude: u64 = @abs(value.*);
+                    var negative = value.* < 0;
+                    var lowest: u8 = p;
+                    if (magnitude != 0) {
+                        if ((flag & flag_refined) != 0) {
+                            lowest = p - 1;
+                            if ((flag & flag_refinement_bit) != 0) magnitude |= @as(u64, 1) << @intCast(p - 1);
+                        }
+                    } else if ((flag & flag_refinement_bit) != 0) {
+                        // Newly significant in the SigProp pass.
+                        lowest = p - 1;
+                        magnitude = @as(u64, 1) << @intCast(p - 1);
+                        negative = (flag & flag_negative) != 0;
+                    }
+                    if (magnitude != 0 and lowest > 0) magnitude |= @as(u64, 1) << @intCast(lowest - 1);
+                    const signed: Coefficient = @intCast(magnitude);
+                    value.* = if (negative) -signed else signed;
+                }
+            }
         }
 
-        fn decodeCleanup(self: *Self, block: Block, quad_width: usize, quad_height: usize) Error!void {
+        /// The HT cleanup pass (7.3), quad pair by quad pair: CxtVLC and
+        /// U-VLC decoding (7.3.4 to 7.3.7), then each quad's MagSgn values in
+        /// scan order (7.3.8); the three bit-streams are independent, so
+        /// interleaving them by pair keeps each one's order. A block with
+        /// only the cleanup pass gets its final values, midpoint included;
+        /// with refinement passes, `mu_n << p` and the sign.
+        fn decodeCleanup(self: *Self, block: Block, out: []Coefficient, stride: usize) Error!void {
             const segment = try CleanupSegment.init(block.cleanup);
             var mag_sgn = ForwardReader{ .bytes = block.cleanup[0..segment.prefix_length], .synthesize_ff = true };
             var mel = MelDecoder{ .reader = .{ .segment = segment, .position = segment.prefix_length } };
             var vlc = VlcReader.init(segment);
-            const padded_width = 2 * quad_width;
-            const magnitudes = self.magnitudes.items;
-            const flags = self.flags.items;
-            const quads = self.quads.items;
-            // An exponent bound above this would give a magnitude of
-            // M_b - p or more bits (7.3.7 bounds U_q by the largest E_n).
-            const max_exponent_bound: u8 = block.magnitude_bitplanes - block.cleanup_plane + 1;
+            const quad_width = (block.width + 1) / 2;
+            const quad_height = (block.height + 1) / 2;
+            const line_length = 2 * quad_width + 2;
+            try self.lines.resize(self.allocator, 4 * line_length);
+            @memset(self.lines.items, 0);
+            var above_significance = self.lines.items[0..line_length];
+            var above_exponents = self.lines.items[line_length..][0..line_length];
+            var below_significance = self.lines.items[2 * line_length ..][0..line_length];
+            var below_exponents = self.lines.items[3 * line_length ..][0..line_length];
+            const quad_out = QuadOutput{
+                .out = out,
+                .stride = stride,
+                .width = block.width,
+                .height = block.height,
+                .plane = block.cleanup_plane,
+                // An exponent bound above this, or a magnitude of M_b - p or
+                // more bits, would not fit the band (7.3.7, 8.7).
+                .magnitude_limit = block.magnitude_bitplanes - block.cleanup_plane,
+                .half = if (block.passes == 1 and block.cleanup_plane > 0)
+                    @as(u64, 1) << @intCast(block.cleanup_plane - 1)
+                else
+                    0,
+            };
+
+            // Insignificant samples are zero: clear the block first, so that
+            // only significant ones are written.
+            for (0..block.height) |y| @memset(out[y * stride ..][0..block.width], 0);
 
             var qy: usize = 0;
             while (qy < quad_height) : (qy += 1) {
                 const initial = qy == 0;
-                const top = 2 * qy * padded_width;
-                const bottom = top + padded_width;
-                // 7.3.4: per quad pair, CxtVLC for both quads, then their
-                // U-VLC prefixes, suffixes, and extensions.
+                @memset(below_significance, 0);
+                @memset(below_exponents, 0);
+                const lines = Lines{
+                    .above_significance = above_significance,
+                    .above_exponents = above_exponents,
+                    .below_significance = below_significance,
+                    .below_exponents = below_exponents,
+                };
+                var left_rho: u4 = 0;
                 var qx: usize = 0;
                 while (qx < quad_width) : (qx += 2) {
                     const pair = qx + 1 < quad_width;
-                    quads[qx] = try decodeSignificance(&vlc, &mel, flags, top, bottom, qx, quad_width, initial, self.above_significance.items);
-                    setQuadSignificance(flags, top, bottom, qx, quads[qx].rho);
-                    if (pair) {
-                        quads[qx + 1] = try decodeSignificance(&vlc, &mel, flags, top, bottom, qx + 1, quad_width, initial, self.above_significance.items);
-                        setQuadSignificance(flags, top, bottom, qx + 1, quads[qx + 1].rho);
-                    }
-                    const first_offset = quads[qx].u_off != 0;
-                    const second_offset = pair and quads[qx + 1].u_off != 0;
+                    const first = try decodeSignificance(&vlc, &mel, quadContext(initial, left_rho, above_significance, qx), initial);
+                    var second = Quad{};
+                    if (pair) second = try decodeSignificance(&vlc, &mel, quadContext(initial, first.rho, above_significance, qx + 1), initial);
+                    left_rho = if (pair) second.rho else first.rho;
+
                     var residual1: u8 = 0;
                     var residual2: u8 = 0;
+                    const first_offset = first.u_off != 0;
+                    const second_offset = second.u_off != 0;
                     if (initial and first_offset and second_offset) {
                         if (try mel.decode() == 1) {
                             const p1 = try decodeUPrefix(&vlc);
@@ -182,75 +233,62 @@ pub fn Decoder(comptime Coefficient: type) type {
                         residual1 = p1 + s1 + 4 * try decodeUExtension(&vlc, s1);
                         residual2 = p2 + s2 + 4 * try decodeUExtension(&vlc, s2);
                     }
-                    quads[qx].bound = exponentBound(quads[qx].rho, residual1, initial, qx, quad_width, self.above_exponents.items);
-                    if (pair) quads[qx + 1].bound = exponentBound(quads[qx + 1].rho, residual2, initial, qx + 1, quad_width, self.above_exponents.items);
+                    try quad_out.write(first, exponentBound(first.rho, residual1, initial, above_exponents, qx), &mag_sgn, lines, qx, 2 * qy);
+                    if (pair) try quad_out.write(second, exponentBound(second.rho, residual2, initial, above_exponents, qx + 1), &mag_sgn, lines, qx + 1, 2 * qy);
                 }
+                // The next quad row predicts from this one's bottom line.
+                std.mem.swap([]u8, &above_significance, &below_significance);
+                std.mem.swap([]u8, &above_exponents, &below_exponents);
+            }
+        }
 
-                // 7.3.8: MagSgn values in quad scan order.
-                for (quads[0..quad_width], 0..) |quad, quad_x| {
-                    if (quad.rho == 0) continue;
-                    if (quad.bound > max_exponent_bound) return Error.InvalidBlock;
-                    const x = 2 * quad_x;
-                    const locations = [4]usize{ top + x, bottom + x, top + x + 1, bottom + x + 1 };
-                    for (locations, 0..) |location, j| {
-                        const bit = @as(u4, 1) << @intCast(j);
-                        if ((quad.rho & bit) == 0) continue;
-                        const known: u8 = @intFromBool((quad.e_k & bit) != 0);
-                        const bits = quad.bound - known;
+        const Lines = struct {
+            above_significance: []const u8,
+            above_exponents: []const u8,
+            below_significance: []u8,
+            below_exponents: []u8,
+        };
+
+        const QuadOutput = struct {
+            out: []Coefficient,
+            stride: usize,
+            width: usize,
+            height: usize,
+            plane: u8,
+            magnitude_limit: u8,
+            half: u64,
+
+            /// Decode one quad's MagSgn values (7.3.8), write its samples,
+            /// and record its bottom line for the next quad row.
+            inline fn write(self: QuadOutput, quad: Quad, bound: u8, mag_sgn: *ForwardReader, lines: Lines, qx: usize, y: usize) Error!void {
+                // The block and the line below are already zero.
+                if (quad.rho == 0) return;
+                const x = 2 * qx;
+                if (bound > self.magnitude_limit + 1) return Error.InvalidBlock;
+                inline for (0..4) |j| {
+                    if ((quad.rho & (1 << j)) != 0) {
+                        const sample_x = x + (j >> 1);
+                        const sample_y = y + (j & 1);
+                        // Padded samples stay insignificant (7.2).
+                        if (sample_x >= self.width or sample_y >= self.height) return Error.InvalidBlock;
+                        const known: u8 = (quad.e_k >> j) & 1;
+                        const bits = bound - known;
                         // A significant sample needs at least its sign bit.
                         if (bits == 0) return Error.InvalidBlock;
                         var value = try mag_sgn.bits(bits);
-                        if ((quad.e_1 & bit) != 0) value |= @as(u64, 1) << @intCast(bits);
-                        magnitudes[location] = (value >> 1) + 1;
-                        if ((value & 1) != 0) flags[location] |= flag_negative;
-                    }
-                }
-
-                // The next quad row predicts from this one's bottom line.
-                for (0..padded_width) |x| {
-                    self.above_significance.items[x] = flags[bottom + x] & flag_significant;
-                    self.above_exponents.items[x] = magnitudeExponent(magnitudes[bottom + x]);
-                }
-            }
-
-            // Padded samples stay insignificant (7.2); decoded magnitudes
-            // stay below 2^(M_b - p).
-            const magnitude_limit = @as(u64, 1) << @intCast(block.magnitude_bitplanes - block.cleanup_plane);
-            for (0..2 * quad_height) |y| {
-                for (0..padded_width) |x| {
-                    const location = y * padded_width + x;
-                    if ((flags[location] & flag_significant) == 0) continue;
-                    if (x >= block.width or y >= block.height) return Error.InvalidBlock;
-                    if (magnitudes[location] >= magnitude_limit) return Error.InvalidBlock;
-                }
-            }
-        }
-
-        fn writeCoefficients(self: *Self, block: Block, padded_width: usize) Error!void {
-            const p = block.cleanup_plane;
-            for (0..block.height) |y| {
-                for (0..block.width) |x| {
-                    const location = y * padded_width + x;
-                    const flag = self.flags.items[location];
-                    var magnitude: Magnitude = 0;
-                    var lowest: u8 = p;
-                    if ((flag & flag_significant) != 0) {
-                        magnitude = @intCast(self.magnitudes.items[location] << @intCast(p));
-                        if ((flag & flag_refined) != 0) {
-                            lowest = p - 1;
-                            if ((flag & flag_refinement_bit) != 0) magnitude |= @as(Magnitude, 1) << @intCast(p - 1);
+                        value |= @as(u64, (quad.e_1 >> j) & 1) << @intCast(bits);
+                        const magnitude = (value >> 1) + 1;
+                        if ((magnitude >> @intCast(self.magnitude_limit)) != 0) return Error.InvalidBlock;
+                        const scaled: Coefficient = @intCast((magnitude << @intCast(self.plane)) | self.half);
+                        self.out[sample_y * self.stride + sample_x] = if ((value & 1) != 0) -scaled else scaled;
+                        if ((j & 1) != 0) {
+                            lines.below_significance[sample_x + 1] = 1;
+                            lines.below_exponents[sample_x + 1] = magnitudeExponent(magnitude);
                         }
-                    } else if ((flag & flag_refinement_bit) != 0) {
-                        // Newly significant in the SigProp pass.
-                        lowest = p - 1;
-                        magnitude = @as(Magnitude, 1) << @intCast(p - 1);
                     }
-                    if (magnitude != 0 and lowest > 0) magnitude |= @as(Magnitude, 1) << @intCast(lowest - 1);
-                    const value: Coefficient = @intCast(magnitude);
-                    self.coefficients.items[y * block.width + x] = if ((flag & flag_negative) != 0) -value else value;
                 }
             }
-        }
+        };
     };
 }
 
@@ -266,70 +304,42 @@ const Quad = struct {
     u_off: u1 = 0,
     e_k: u4 = 0,
     e_1: u4 = 0,
-    /// U_q = kappa_q + u_q.
-    bound: u8 = 0,
 };
 
-fn setQuadSignificance(flags: []u8, top: usize, bottom: usize, qx: usize, rho: u4) void {
-    const x = 2 * qx;
-    if ((rho & 1) != 0) flags[top + x] |= flag_significant;
-    if ((rho & 2) != 0) flags[bottom + x] |= flag_significant;
-    if ((rho & 4) != 0) flags[top + x + 1] |= flag_significant;
-    if ((rho & 8) != 0) flags[bottom + x + 1] |= flag_significant;
-}
-
-fn significant(flags: []const u8, location: usize) u8 {
-    return flags[location] & flag_significant;
-}
-
-/// decodeSigEMB (7.3.5) with the context c_q of Formulas (1) and (2).
-fn decodeSignificance(
-    vlc: *VlcReader,
-    mel: *MelDecoder,
-    flags: []const u8,
-    top: usize,
-    bottom: usize,
-    qx: usize,
-    quad_width: usize,
-    initial: bool,
-    above: []const u8,
-) Error!Quad {
-    const x = 2 * qx;
-    var context: u8 = 0;
+/// The context c_q of Formulas (1) and (2). `left_rho` is the significance
+/// of the quad to the left (zero for the first quad of a row); `above` holds
+/// the previous quad row's bottom line with a zero guard column either side,
+/// so column x is at index x + 1.
+inline fn quadContext(initial: bool, left_rho: u4, above: []const u8, qx: usize) u8 {
+    const w: u8 = (left_rho >> 2) & 1;
+    const sw: u8 = (left_rho >> 3) & 1;
     if (initial) {
-        if (qx > 0) {
-            const f = significant(flags, top + x - 2);
-            const sf = significant(flags, bottom + x - 2);
-            const w = significant(flags, top + x - 1);
-            const sw = significant(flags, bottom + x - 1);
-            context = (f | sf) + 2 * w + 4 * sw;
-        }
-    } else {
-        const nw = if (qx > 0) above[x - 1] else 0;
-        const n = above[x];
-        const ne = above[x + 1];
-        const nf = if (qx + 1 < quad_width) above[x + 2] else 0;
-        const w = if (qx > 0) significant(flags, top + x - 1) else 0;
-        const sw = if (qx > 0) significant(flags, bottom + x - 1) else 0;
-        context = (nw | n) + 2 * (w | sw) + 4 * (ne | nf);
+        const f: u8 = left_rho & 1;
+        const sf: u8 = (left_rho >> 1) & 1;
+        return (f | sf) + 2 * w + 4 * sw;
     }
+    const c = 2 * qx + 1;
+    return (above[c - 1] | above[c]) + 2 * (w | sw) + 4 * (above[c + 1] | above[c + 2]);
+}
+
+/// decodeSigEMB (7.3.5).
+inline fn decodeSignificance(vlc: *VlcReader, mel: *MelDecoder, context: u8, initial: bool) Error!Quad {
     if (context == 0 and try mel.decode() == 0) return .{};
-    const entry = (if (initial) &cxt_vlc_lookup_0 else &cxt_vlc_lookup_1)[(@as(usize, context) << 7) | try vlc.peek7()];
+    const entry = (if (initial) &cxt_vlc_lookup_0 else &cxt_vlc_lookup_1)[(@as(usize, context) << 7) | try vlc.peek(7)];
     if (entry.len == 0) return Error.InvalidBlock;
     try vlc.skip(entry.len);
     return .{ .rho = entry.rho, .u_off = entry.u_off, .e_k = entry.e_k, .e_1 = entry.e_1 };
 }
 
-/// kappa_q + u_q (7.3.7).
-fn exponentBound(rho: u4, u: u8, initial: bool, qx: usize, quad_width: usize, above: []const u8) u8 {
+/// kappa_q + u_q (7.3.7), with the exponents of the line above in the
+/// guard layout of `quadContext`.
+inline fn exponentBound(rho: u4, u: u8, initial: bool, above: []const u8, qx: usize) u8 {
     var kappa: u8 = 1;
-    if (!initial) {
-        const x = 2 * qx;
-        const nw = if (qx > 0) above[x - 1] else 0;
-        const nf = if (qx + 1 < quad_width) above[x + 2] else 0;
-        const largest = @max(@max(nw, above[x]), @max(above[x + 1], nf));
-        // gamma_q: more than one significant sample.
-        if (@popCount(rho) > 1 and largest > 1) kappa = largest - 1;
+    // gamma_q: more than one significant sample.
+    if (!initial and @popCount(rho) > 1) {
+        const c = 2 * qx + 1;
+        const largest = @max(@max(above[c - 1], above[c]), @max(above[c + 1], above[c + 2]));
+        if (largest > 1) kappa = largest - 1;
     }
     return kappa + u;
 }
@@ -340,19 +350,28 @@ fn magnitudeExponent(magnitude: u64) u8 {
     return @intCast(65 - @clz(magnitude - 1));
 }
 
-fn decodeUPrefix(vlc: *VlcReader) Error!u8 {
-    if (try vlc.bit() == 1) return 1;
-    if (try vlc.bit() == 1) return 2;
-    return if (try vlc.bit() == 1) 3 else 5;
+/// The U-VLC prefix of Table 3 from one look-ahead: "1", "01", "001", "000".
+inline fn decodeUPrefix(vlc: *VlcReader) Error!u8 {
+    const look = try vlc.peek(3);
+    if ((look & 1) != 0) {
+        try vlc.skip(1);
+        return 1;
+    }
+    if ((look & 2) != 0) {
+        try vlc.skip(2);
+        return 2;
+    }
+    try vlc.skip(3);
+    return if ((look & 4) != 0) 3 else 5;
 }
 
-fn decodeUSuffix(vlc: *VlcReader, prefix: u8) Error!u8 {
+inline fn decodeUSuffix(vlc: *VlcReader, prefix: u8) Error!u8 {
     if (prefix < 3) return 0;
     if (prefix == 3) return try vlc.bit();
     return @intCast(try vlc.bits(5));
 }
 
-fn decodeUExtension(vlc: *VlcReader, suffix: u8) Error!u8 {
+inline fn decodeUExtension(vlc: *VlcReader, suffix: u8) Error!u8 {
     if (suffix < 28) return 0;
     return @intCast(try vlc.bits(4));
 }
@@ -387,8 +406,11 @@ fn checkSegmentBytes(bytes: []const u8, max_length: usize) Error!void {
     if (bytes.len > max_length) return Error.InvalidBlock;
     if (bytes.len == 0) return;
     if (bytes[bytes.len - 1] == 0xff) return Error.InvalidBlock;
-    for (bytes[0 .. bytes.len - 1], bytes[1..]) |first, second| {
-        if (first == 0xff and second > 0x8f) return Error.InvalidBlock;
+    var start: usize = 0;
+    while (std.mem.indexOfScalarPos(u8, bytes, start, 0xff)) |index| {
+        // Not the last byte, checked above.
+        if (bytes[index + 1] > 0x8f) return Error.InvalidBlock;
+        start = index + 1;
     }
 }
 
@@ -406,6 +428,18 @@ const ForwardReader = struct {
     count: u7 = 0,
 
     fn load(self: *ForwardReader) Error!void {
+        // Four bytes at once when none but the last is 0xFF, so that each
+        // gives all eight bits.
+        if (self.last != 0xff and self.count <= 32 and self.bytes.len - @min(self.position, self.bytes.len) >= 4) {
+            const word = std.mem.readInt(u32, self.bytes[self.position..][0..4], .little);
+            if ((word & 0xff) != 0xff and ((word >> 8) & 0xff) != 0xff and ((word >> 16) & 0xff) != 0xff) {
+                self.buffer |= @as(u64, word) << @intCast(self.count);
+                self.count += 32;
+                self.position += 4;
+                self.last = @truncate(word >> 24);
+                return;
+            }
+        }
         const width: u4 = if (self.last == 0xff) 7 else 8;
         var value: u8 = 0;
         if (self.position < self.bytes.len) {
@@ -427,16 +461,22 @@ const ForwardReader = struct {
     }
 
     /// The next `n <= 64` bits, the first one least significant.
-    fn bits(self: *ForwardReader, n: u8) Error!u64 {
-        if (n > 32) {
-            const low = try self.bits(32);
-            return low | (try self.bits(n - 32)) << 32;
+    inline fn bits(self: *ForwardReader, n: u8) Error!u64 {
+        if (n > 32) return self.wideBits(n);
+        if (self.count < n) {
+            @branchHint(.unlikely);
+            try self.load();
+            while (self.count < n) try self.load();
         }
-        while (self.count < n) try self.load();
         const value = self.buffer & ((@as(u64, 1) << @intCast(n)) - 1);
         self.buffer >>= @intCast(n);
         self.count -= @intCast(n);
         return value;
+    }
+
+    fn wideBits(self: *ForwardReader, n: u8) Error!u64 {
+        const low = try self.bits(32);
+        return low | (try self.bits(n - 32)) << 32;
     }
 };
 
@@ -523,6 +563,20 @@ const VlcReader = struct {
     }
 
     fn load(self: *VlcReader) void {
+        // Four bytes at once, read backward, when none has its seven low bits
+        // set: then none loses a stuffing bit whatever came before it. The
+        // bytes below Lcup - 2 are never the ones modDcup changes.
+        const lowest = self.position - 3;
+        if (self.count <= 32 and lowest >= @as(isize, @intCast(self.segment.prefix_length))) {
+            const word = std.mem.readInt(u32, self.segment.bytes[@intCast(lowest)..][0..4], .big);
+            if (!hasLowSevenSet(word)) {
+                self.buffer |= @as(u64, word) << @intCast(self.count);
+                self.count += 32;
+                self.position -= 4;
+                self.last = @truncate(word >> 24);
+                return;
+            }
+        }
         if (self.position < @as(isize, @intCast(self.segment.prefix_length))) {
             self.count += 8;
             self.padding += 8;
@@ -537,13 +591,15 @@ const VlcReader = struct {
         self.count += width;
     }
 
-    fn fill(self: *VlcReader, n: u7) void {
+    inline fn fill(self: *VlcReader, n: u7) void {
         while (self.count < n) self.load();
     }
 
-    fn peek7(self: *VlcReader) Error!usize {
-        self.fill(7);
-        return @intCast(self.buffer & 0x7f);
+    /// The next `n` bits without consuming them; bits past the stream's
+    /// end read as zero here and fail in `skip`.
+    fn peek(self: *VlcReader, comptime n: u7) Error!usize {
+        self.fill(n);
+        return @intCast(self.buffer & ((1 << n) - 1));
     }
 
     fn skip(self: *VlcReader, n: u7) Error!void {
@@ -564,6 +620,14 @@ const VlcReader = struct {
         return value;
     }
 };
+
+/// Whether any byte of `word` has its seven low bits all set.
+inline fn hasLowSevenSet(word: u32) bool {
+    inline for (0..4) |i| {
+        if (((word >> (8 * i)) & 0x7f) == 0x7f) return true;
+    }
+    return false;
+}
 
 /// importMagRefBit (7.1.6): bits least significant first from the end of
 /// the refinement segment backward, zeros before its start.
@@ -598,7 +662,7 @@ const MagRefReader = struct {
 
 /// The HT SigProp pass (7.4): four-line stripes, four-column groups, a
 /// magnitude step then a sign step over each group.
-fn decodeSigProp(flags: []u8, padded_width: usize, block: Block, reader: *ForwardReader) Error!void {
+fn decodeSigProp(flags: []u8, stride: usize, block: Block, reader: *ForwardReader) Error!void {
     const width = block.width;
     const height = block.height;
     var stripe: usize = 0;
@@ -611,16 +675,16 @@ fn decodeSigProp(flags: []u8, padded_width: usize, block: Block, reader: *Forwar
             const group_end = @min(group + 4, width);
             for (group..group_end) |x| {
                 for (stripe..stripe_end) |y| {
-                    const location = y * padded_width + x;
+                    const location = y * stride + x;
                     if ((flags[location] & flag_significant) != 0) continue;
-                    if (!sigPropNeighbourhood(flags, padded_width, width, below_limit, x, y)) continue;
+                    if (!sigPropNeighbourhood(flags, stride, width, below_limit, x, y)) continue;
                     flags[location] |= flag_refined;
                     if (try reader.bit() == 1) flags[location] |= flag_refinement_bit;
                 }
             }
             for (group..group_end) |x| {
                 for (stripe..stripe_end) |y| {
-                    const location = y * padded_width + x;
+                    const location = y * stride + x;
                     if ((flags[location] & flag_significant) != 0 or (flags[location] & flag_refinement_bit) == 0) continue;
                     if (try reader.bit() == 1) flags[location] |= flag_negative;
                 }
@@ -635,7 +699,7 @@ fn decodeSigProp(flags: []u8, padded_width: usize, block: Block, reader: *Forwar
 /// is in the scan-causal neighbourhood.
 fn sigPropNeighbourhood(
     flags: []const u8,
-    padded_width: usize,
+    stride: usize,
     width: usize,
     below_limit: usize,
     x: usize,
@@ -648,7 +712,7 @@ fn sigPropNeighbourhood(
     for (y0..y1 + 1) |ny| {
         for (x0..x1 + 1) |nx| {
             if (nx == x and ny == y) continue;
-            if ((flags[ny * padded_width + nx] & (flag_significant | flag_refinement_bit)) != 0) return true;
+            if ((flags[ny * stride + nx] & (flag_significant | flag_refinement_bit)) != 0) return true;
         }
     }
     return false;
@@ -656,13 +720,13 @@ fn sigPropNeighbourhood(
 
 /// The HT MagRef pass (7.5): one bit for each cleanup-significant sample,
 /// in stripe scan order.
-fn decodeMagRef(flags: []u8, padded_width: usize, block: Block, reader: *MagRefReader) void {
+fn decodeMagRef(flags: []u8, stride: usize, block: Block, reader: *MagRefReader) void {
     var stripe: usize = 0;
     while (stripe < block.height) : (stripe += 4) {
         const stripe_end = @min(stripe + 4, block.height);
         for (0..block.width) |x| {
             for (stripe..stripe_end) |y| {
-                const location = y * padded_width + x;
+                const location = y * stride + x;
                 if ((flags[location] & flag_significant) == 0) continue;
                 flags[location] |= flag_refined;
                 if (reader.bit() == 1) flags[location] |= flag_refinement_bit;

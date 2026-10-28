@@ -16538,11 +16538,7 @@ fn strictBlockDecodeWorker(job: anytype) void {
             job.worker_stats.payload_bytes += @intCast(payload.len);
         }
         if (block.code_block_style.high_throughput) {
-            const decoded = decodeStrictHighThroughputBlock(Coefficient, &ht_decoder, block, payload) catch |err| {
-                job.result = err;
-                return;
-            };
-            scatterStrictDecodedBlockUnchecked(target.plane, target.width, target.height, block.rect, decoded) catch |err| {
+            decodeStrictHighThroughputBlock(Coefficient, &ht_decoder, block, payload, target.plane, target.width, target.height) catch |err| {
                 job.result = err;
                 return;
             };
@@ -17028,8 +17024,7 @@ fn decodeStrictComponentBlocksSerial(
         const payload = catalog.blockPayload(component, block_index);
         if (payload.len != block.payload_length) return CodestreamError.InvalidCodestream;
         if (block.code_block_style.high_throughput) {
-            const decoded = try decodeStrictHighThroughputBlock(Coefficient, &ht_decoder, block, payload);
-            try scatterStrictDecodedBlockUnchecked(plane, width, height, block.rect, decoded);
+            try decodeStrictHighThroughputBlock(Coefficient, &ht_decoder, block, payload, plane, width, height);
             continue;
         }
         if (block.code_block_style.bypass) {
@@ -17100,16 +17095,18 @@ fn decodeStrictComponentBlocksSerial(
     }
 }
 
-/// Decode an HT code-block (ITU-T T.814 clause 7) from its catalog entry:
-/// its HT cleanup segment and, with SigProp or MagRef passes, its HT
-/// refinement segment (Annex B). The view stays valid until the decoder's
-/// next block.
+/// Decode an HT code-block (ITU-T T.814 clause 7) from its catalog entry
+/// straight into its rectangle of `plane`: its HT cleanup segment and, with
+/// SigProp or MagRef passes, its HT refinement segment (Annex B).
 fn decodeStrictHighThroughputBlock(
     comptime Coefficient: type,
     decoder: *ht.Decoder(Coefficient),
     block: StrictPacketBlock,
     payload: []const u8,
-) ![]const Coefficient {
+    plane: []Coefficient,
+    plane_width: usize,
+    plane_height: usize,
+) !void {
     if (block.nominal_bitplanes > ht.Decoder(Coefficient).max_bitplanes) return CodestreamError.UnsupportedPayload;
     var request = ht.Block{
         .width = block.rect.width,
@@ -17145,9 +17142,15 @@ fn decodeStrictHighThroughputBlock(
         // Only placeholder passes, which carry no bytes: no HT set yet.
         return CodestreamError.InvalidCodestream;
     }
-    return decoder.decode(request) catch |err| switch (err) {
-        error.InvalidBlock => CodestreamError.InvalidCodestream,
-        error.OutOfMemory => error.OutOfMemory,
+    const end_x = try std.math.add(usize, block.rect.x, block.rect.width);
+    const end_y = try std.math.add(usize, block.rect.y, block.rect.height);
+    if (end_x > plane_width or end_y > plane_height or plane.len < plane_width * plane_height) {
+        return CodestreamError.InvalidCodestream;
+    }
+    const origin = block.rect.y * plane_width + block.rect.x;
+    decoder.decodeInto(request, plane[origin..], plane_width) catch |err| switch (err) {
+        error.InvalidBlock => return CodestreamError.InvalidCodestream,
+        error.OutOfMemory => return error.OutOfMemory,
     };
 }
 

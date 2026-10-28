@@ -1083,10 +1083,14 @@ checked against each other. Done, 2026-10-28: the HT block decoder
 codestreams and the codestreams of the 20 WG1 JPH files; the changelog has
 the evidence. Done, 2026-10-28: JPH files decode through the JP2 path
 (brand `jph `, METH 3 and METH 5 colour; 16 of the 20 WG1 JPH files).
-Next, in order: the HT decoder's speed (the reason HT exists; a straightforward
-per-sample implementation of clause 7 today, to be measured against Kakadu
-and OpenJPH before any rewrite), MIXED tile-components and MULTIHT, then
-the HT encoder, lossless first.
+Speed, first pass, 2026-10-28: on the 2048x2048 RGB lossless HT encode one
+thread went from 207.6 to 138.3 ms (block decoding 141 -> 75 ms) against
+Kakadu 8.4.1's 67.6 ms; at twenty threads z2000 takes 60.7 ms against 45.0.
+What remains in the block decoder is the per-sample MagSgn and per-quad VLC
+work; closing the gap needs the OpenJPH/Kakadu style (quad pairs through
+joint tables, vectorized MagSgn unpacking), and at many threads the stages
+around Tier-1. Next, in order: MIXED tile-components and MULTIHT, the HT
+encoder (lossless first), and more decoder speed alongside.
 
 The HT packet headers need one rule T.814 leaves implicit. Kakadu's
 transcodes of multi-layer Part 1 streams keep each packet's coding passes,
