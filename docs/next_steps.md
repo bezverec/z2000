@@ -1119,11 +1119,12 @@ and its passes per block for the final rate, which unlike Part 1 is met too
 (the ratios are of the lossless or fully quantized HT payload), and the
 earlier layers take passes of that set. At the same size the 2048x2048 RGB
 image decodes within 0.1 to 0.4 dB of Kakadu's `Cmodes=HT -rate` (5/3) and
-at or above it (9/7). The encode codes every set, about 10x a lossless one
-(680 ms at one thread, 127 ms at twenty against 63 and 24 lossless); next,
-estimate each block's plane from the rate and code two or three sets around
-it, as Kakadu does. Then MULTIHT streams for quality layers that keep a
-complete final layer, and encoder and decoder speed alongside.
+at or above it (9/7). Since then each block's plane is estimated from its
+bit-length histogram and only the sets of three planes around it are coded
+(the wide encoder still codes all): 342 ms at one thread and 74 at twenty
+(was 689 and 133), at the same quality. What is left is the three sets'
+cleanup passes and SigProp, scalar; Kakadu takes about 30 ms. MULTIHT
+streams for quality layers that keep a complete final layer wait.
 
 The HT packet headers need one rule T.814 leaves implicit. Kakadu's
 transcodes of multi-layer Part 1 streams keep each packet's coding passes,

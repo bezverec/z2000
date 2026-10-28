@@ -233,10 +233,14 @@ pub const CodeBlockSegment = struct {
 pub const HighThroughputSets = struct {
     bytes: []u8,
     sets: []HighThroughputSet,
+    /// A cheap estimate of the cleanup pass at every plane below the
+    /// block's top bit-plane, for choosing which sets to code.
+    estimates: []HighThroughputEstimate = &.{},
 
     pub fn deinit(self: *HighThroughputSets, allocator: std.mem.Allocator) void {
         allocator.free(self.bytes);
         allocator.free(self.sets);
+        allocator.free(self.estimates);
         self.* = undefined;
     }
 
@@ -246,6 +250,60 @@ pub const HighThroughputSets = struct {
         return self.bytes[set.offset..][0..set.cumulativeBytes(passes)];
     }
 };
+
+/// The cleanup pass at one plane as `estimateHighThroughputPlanes` sees it.
+pub const HighThroughputEstimate = struct {
+    bytes: f64,
+    /// The distortion left, weighted as the sets' are.
+    distortion: f64,
+};
+
+/// Estimates of the cleanup pass at every plane below `bitplanes` from the
+/// block's bit-length histogram: the distortion of the samples left
+/// insignificant exactly, a uniform error for the others; the bytes as the
+/// magnitude bits above the plane plus one a sample, scaled to the lossless
+/// cleanup pass's `lossless_bytes`.
+pub fn estimateHighThroughputPlanes(
+    comptime Coefficient: type,
+    allocator: std.mem.Allocator,
+    samples: []const Coefficient,
+    stride: usize,
+    rect: subband.Rect,
+    bitplanes: u8,
+    lossless_bytes: usize,
+) ![]HighThroughputEstimate {
+    var counts: [65]f64 = @splat(0);
+    var squares: [65]f64 = @splat(0);
+    for (0..rect.height) |y| {
+        for (samples[y * stride ..][0..rect.width]) |sample| {
+            const mu: u64 = @abs(sample);
+            const length = 64 - @clz(mu);
+            const value: f64 = @floatFromInt(mu);
+            counts[length] += 1;
+            squares[length] += value * value;
+        }
+    }
+    const estimates = try allocator.alloc(HighThroughputEstimate, bitplanes);
+    var lossless_bits: f64 = 0;
+    for (estimates, 0..) |*estimate, plane| {
+        var bits: f64 = 0;
+        var distortion: f64 = 0;
+        for (counts[0 .. @as(usize, bitplanes) + 1], 0..) |count, length| {
+            if (length <= plane) {
+                distortion += squares[length];
+            } else {
+                bits += count * @as(f64, @floatFromInt(length - plane + 1));
+                // The midpoint leaves a uniform error over 2^plane values.
+                distortion += count * std.math.ldexp(@as(f64, 1), @intCast(2 * plane)) / 12;
+            }
+        }
+        if (plane == 0) lossless_bits = bits;
+        estimate.* = .{ .bytes = bits, .distortion = if (plane == 0) 0 else distortion };
+    }
+    const scale = if (lossless_bits > 0) @as(f64, @floatFromInt(lossless_bytes)) / lossless_bits else 0;
+    for (estimates) |*estimate| estimate.bytes *= scale;
+    return estimates;
+}
 
 pub const HighThroughputSet = struct {
     plane: u8,
@@ -6059,7 +6117,7 @@ fn encodeCodeBlockSegmentDirectIsoScratchInternal(
         if (scratch.high_throughput == null) scratch.high_throughput = ht.Encoder(i32).init(scratch.allocator);
         // Rate targets weigh candidate HT sets, not passes of one set.
         if (track_distortion) {
-            return encodeCodeBlockSegmentHighThroughputSets(i32, &scratch.high_throughput.?, source_plane, source_stride, source_rect, style.vertical_causal);
+            return encodeCodeBlockSegmentHighThroughputSets(i32, &scratch.high_throughput.?, source_plane, source_stride, source_rect, style.vertical_causal, false);
         }
         return encodeCodeBlockSegmentHighThroughput(i32, &scratch.high_throughput.?, source_plane, source_stride, source_rect);
     }
@@ -6258,12 +6316,15 @@ pub fn encodeCodeBlockSegmentHighThroughputWideSets(
     vertical_causal: bool,
 ) !CodeBlockSegment {
     if (scratch.high_throughput == null) scratch.high_throughput = ht.Encoder(i64).init(scratch.allocator);
-    return encodeCodeBlockSegmentHighThroughputSets(i64, &scratch.high_throughput.?, plane, stride, rect, vertical_causal);
+    return encodeCodeBlockSegmentHighThroughputSets(i64, &scratch.high_throughput.?, plane, stride, rect, vertical_causal, true);
 }
 
-/// A rate-targeted HT code-block: every HT set it could keep, from cleanup
-/// plane 0 up to its top bit-plane, in `ht_sets`, the segment itself being
-/// the lossless set until `selectHighThroughputSet` keeps another.
+/// A rate-targeted HT code-block: in `ht_sets`, the lossless set and
+/// estimates of the cleanup pass at every other plane, or with
+/// `every_plane` every HT set it could keep, from cleanup plane 0 up to its
+/// top bit-plane; the segment itself is the lossless set until
+/// `selectHighThroughputSet` keeps another. `addHighThroughputSets` codes
+/// more of them.
 pub fn encodeCodeBlockSegmentHighThroughputSets(
     comptime Coefficient: type,
     encoder: *ht.Encoder(Coefficient),
@@ -6271,6 +6332,7 @@ pub fn encodeCodeBlockSegmentHighThroughputSets(
     stride: usize,
     rect: subband.Rect,
     vertical_causal: bool,
+    every_plane: bool,
 ) !CodeBlockSegment {
     if (rect.width == 0 or rect.height == 0 or rect.width * rect.height > max_codeblock_area) return EbcotError.InvalidBlock;
     const origin = std.math.add(usize, std.math.mul(usize, rect.y, stride) catch return EbcotError.InvalidBlock, rect.x) catch
@@ -6283,8 +6345,10 @@ pub fn encodeCodeBlockSegmentHighThroughputSets(
     var sets: std.ArrayList(HighThroughputSet) = .empty;
     defer sets.deinit(allocator);
     var bitplanes: u8 = 1;
+    // The planes coded: all of the block's, or the lossless one alone.
+    var coded_planes: u8 = 1;
     var cleanup_plane: u8 = 0;
-    while (cleanup_plane < bitplanes) : (cleanup_plane += 1) {
+    while (cleanup_plane < coded_planes) : (cleanup_plane += 1) {
         const set = encoder.encodeSet(samples, stride, rect.width, rect.height, cleanup_plane, vertical_causal) catch |err| switch (err) {
             error.InvalidBlock => return EbcotError.InvalidBlock,
             error.OutOfMemory => return error.OutOfMemory,
@@ -6294,6 +6358,7 @@ pub fn encodeCodeBlockSegmentHighThroughputSets(
                 return .{ .bitplanes = 0, .non_zero_count = 0, .pass_count = 0, .byte_length = 0, .passes = &.{}, .bytes = &.{}, .high_throughput = true };
             }
             bitplanes = set.cleanup.bitplanes;
+            if (every_plane) coded_planes = bitplanes;
         }
         try sets.append(allocator, .{
             .plane = cleanup_plane,
@@ -6323,8 +6388,59 @@ pub fn encodeCodeBlockSegmentHighThroughputSets(
         return err;
     };
     errdefer segment.deinit(allocator);
+    segment.ht_sets.?.estimates = try estimateHighThroughputPlanes(Coefficient, allocator, samples, stride, rect, bitplanes, segment.ht_sets.?.sets[0].cleanup_length);
     try selectHighThroughputSet(allocator, &segment, 0, 1);
     return segment;
+}
+
+/// Code the HT sets of `planes` (each below the block's bit-planes and not
+/// yet coded) and add them to `segment.ht_sets`, unweighted.
+pub fn addHighThroughputSets(
+    comptime Coefficient: type,
+    encoder: *ht.Encoder(Coefficient),
+    plane: []const Coefficient,
+    stride: usize,
+    rect: subband.Rect,
+    vertical_causal: bool,
+    segment: *CodeBlockSegment,
+    planes: []const u8,
+) !void {
+    const sets = if (segment.ht_sets) |*value| value else return EbcotError.InvalidBlock;
+    const origin = rect.y * stride + rect.x;
+    const samples = plane[origin..];
+    const allocator = encoder.allocator;
+    // On an error the block is left without candidates.
+    var bytes: std.ArrayList(u8) = .fromOwnedSlice(sets.bytes);
+    sets.bytes = &.{};
+    errdefer bytes.deinit(allocator);
+    var table: std.ArrayList(HighThroughputSet) = .fromOwnedSlice(sets.sets);
+    sets.sets = &.{};
+    errdefer table.deinit(allocator);
+    for (planes) |cleanup_plane| {
+        if (cleanup_plane >= segment.bitplanes) return EbcotError.InvalidBlock;
+        const set = encoder.encodeSet(samples, stride, rect.width, rect.height, cleanup_plane, vertical_causal) catch |err| switch (err) {
+            error.InvalidBlock => return EbcotError.InvalidBlock,
+            error.OutOfMemory => return error.OutOfMemory,
+        };
+        try table.ensureUnusedCapacity(allocator, 1);
+        try bytes.ensureUnusedCapacity(allocator, set.cleanup.bytes.len + set.refinement.len);
+        table.appendAssumeCapacity(.{
+            .plane = cleanup_plane,
+            .offset = bytes.items.len,
+            .cleanup_length = set.cleanup.bytes.len,
+            .sig_prop_length = set.sig_prop_length,
+            .refinement_length = set.refinement.len,
+            .non_zero_count = set.cleanup.non_zero_count,
+            .pass_count = set.passCount(),
+            .distortion = set.distortion,
+        });
+        bytes.appendSliceAssumeCapacity(set.cleanup.bytes);
+        bytes.appendSliceAssumeCapacity(set.refinement);
+    }
+    const owned_table = try table.toOwnedSlice(allocator);
+    errdefer allocator.free(owned_table);
+    sets.bytes = try bytes.toOwnedSlice(allocator);
+    sets.sets = owned_table;
 }
 
 /// Make `segment` the first `passes` coding passes of its candidate set

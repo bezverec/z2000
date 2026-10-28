@@ -2,6 +2,7 @@ const std = @import("std");
 const color = @import("color.zig");
 const ebcot = @import("ebcot.zig");
 const image = @import("image.zig");
+const ht = @import("ht.zig");
 const packet_plan = @import("packet_plan.zig");
 const rate_alloc = @import("rate_alloc.zig");
 const subband = @import("subband.zig");
@@ -1880,6 +1881,140 @@ fn ratesNeedDistortions(rate_count: u8, layers: u16, style: ebcot.CodeBlockStyle
     return rate_count > 0 and (layers > 1 or style.high_throughput) and !style.terminate_all;
 }
 
+/// Rate-targeted HT blocks come coded with their lossless set and an
+/// estimate of the cleanup pass at every other plane. One slope threshold
+/// over the tile's estimates at the final rate (applied to the tile's own
+/// lossless bytes) picks a plane per block, and the sets of that plane and
+/// the two beside it are coded exactly while the tile's samples are alive,
+/// or the two top planes' where the estimate keeps nothing; the grid-wide
+/// allocation then picks among the coded sets. A final layer kept complete
+/// needs only the lossless sets.
+fn codeEstimatedHighThroughputSets(
+    allocator: std.mem.Allocator,
+    rct_tile: RctTile,
+    catalog: *EncodedBlockCatalog,
+    style: ebcot.CodeBlockStyle,
+    band_weights: ?[33][4]f64,
+    options: PacketScaffoldOptions,
+    layers: u16,
+) !void {
+    if (options.rate_count != layers) return;
+    const blocks = catalog.blocks;
+    var point_count: usize = 0;
+    var lossless_bytes: f64 = 0;
+    for (blocks) |encoded| {
+        const sets = encoded.segment.ht_sets orelse continue;
+        point_count += sets.estimates.len;
+        lossless_bytes += @floatFromInt(sets.sets[0].cleanup_length);
+    }
+    if (point_count == 0) return;
+
+    const points = try allocator.alloc(rate_alloc.RatePoint, point_count);
+    defer allocator.free(points);
+    const offsets = try allocator.alloc(usize, blocks.len + 1);
+    defer allocator.free(offsets);
+    var cursor: usize = 0;
+    for (blocks, 0..) |encoded, index| {
+        offsets[index] = cursor;
+        const sets = encoded.segment.ht_sets orelse continue;
+        const weight = if (band_weights) |table|
+            table[encoded.job.band.level][@backingInt(encoded.job.band.kind)]
+        else
+            pcrdBandWeight(encoded.job.band);
+        const lossless = sets.sets[0];
+        for (sets.estimates, 0..) |estimate, plane| {
+            // The lossless set is coded: its own bytes and distortion.
+            const bytes: f64 = if (plane == 0) @floatFromInt(lossless.cleanup_length) else estimate.bytes;
+            const left = if (plane == 0) lossless.distortion[1] else estimate.distortion;
+            points[cursor] = .{
+                .bytes = @intFromFloat(@max(1, @round(bytes))),
+                .gain = weight * (lossless.distortion[0] - left),
+                .tag = @intCast(plane),
+            };
+            cursor += 1;
+        }
+    }
+    offsets[blocks.len] = cursor;
+    const picked = try allocator.alloc(?u16, blocks.len);
+    defer allocator.free(picked);
+    const final_rate = options.rates[options.rate_count - 1];
+    const target: u64 = @intFromFloat(@ceil(lossless_bytes / final_rate));
+    rate_alloc.selectPointsForTarget(allocator, points[0..cursor], offsets, target, picked) catch
+        return PacketScaffoldError.InvalidLayer;
+    var next_block = std.atomic.Value(usize).init(0);
+    const worker_count = @max(1, @min(@as(usize, options.threads), blocks.len));
+    const workers = try allocator.alloc(HighThroughputSetWorker, worker_count);
+    defer allocator.free(workers);
+    for (workers) |*worker| worker.* = .{
+        .allocator = allocator,
+        .rct_tile = rct_tile,
+        .blocks = blocks,
+        .picked = picked,
+        .vertical_causal = style.vertical_causal,
+        .next_block = &next_block,
+    };
+    const threads = try allocator.alloc(std.Thread, worker_count - 1);
+    defer allocator.free(threads);
+    var spawned: usize = 0;
+    while (spawned < threads.len) : (spawned += 1) {
+        threads[spawned] = std.Thread.spawn(.{}, HighThroughputSetWorker.run, .{&workers[spawned]}) catch break;
+    }
+    workers[worker_count - 1].run();
+    for (threads[0..spawned]) |thread| thread.join();
+    for (workers) |worker| try worker.result;
+}
+
+/// One worker of `codeEstimatedHighThroughputSets`.
+const HighThroughputSetWorker = struct {
+    allocator: std.mem.Allocator,
+    rct_tile: RctTile,
+    blocks: []EncodedComponentBlock,
+    picked: []const ?u16,
+    vertical_causal: bool,
+    next_block: *std.atomic.Value(usize),
+    result: anyerror!void = {},
+
+    fn run(self: *HighThroughputSetWorker) void {
+        var encoder = ht.Encoder(i32).init(self.allocator);
+        defer encoder.deinit();
+        while (true) {
+            const index = self.next_block.fetchAdd(1, .monotonic);
+            if (index >= self.blocks.len) return;
+            self.code(&encoder, index) catch |err| {
+                self.result = err;
+                self.next_block.store(self.blocks.len, .monotonic);
+                return;
+            };
+        }
+    }
+
+    fn code(self: *HighThroughputSetWorker, encoder: *ht.Encoder(i32), index: usize) !void {
+        const encoded = &self.blocks[index];
+        if (encoded.segment.ht_sets == null) return;
+        const top = encoded.segment.bitplanes;
+        var planes: [3]u8 = undefined;
+        var count: usize = 0;
+        if (self.picked[index]) |tag| {
+            const estimate: u8 = @intCast(tag);
+            for ([_]u8{ estimate -| 1, estimate, estimate + 1 }) |plane| {
+                if (plane == 0 or plane >= top) continue;
+                if (count > 0 and planes[count - 1] == plane) continue;
+                planes[count] = plane;
+                count += 1;
+            }
+        } else {
+            for ([_]u8{ top -| 1, top -| 2 }) |plane| {
+                if (plane == 0 or (count > 0 and planes[count - 1] == plane)) continue;
+                planes[count] = plane;
+                count += 1;
+            }
+        }
+        if (count == 0) return;
+        const plane = componentPlane(self.rct_tile, encoded.job.component) orelse return PacketScaffoldError.InvalidComponentBlock;
+        try ebcot.addHighThroughputSets(i32, encoder, plane, self.rct_tile.planes.width, encoded.job.rect, self.vertical_causal, &encoded.segment, planes[0..count]);
+    }
+};
+
 /// Computes and stores each block's band-weighted per-pass distortion
 /// reductions while the tile's RCT planes are still alive; the grid-level
 /// global PCRD pass consumes them once every tile has been encoded.
@@ -1908,6 +2043,7 @@ fn storeCatalogPassDistortions(
             for (sets.sets) |*set| {
                 for (&set.distortion) |*value| value.* *= weight;
             }
+            for (sets.estimates) |*estimate| estimate.distortion *= weight;
         } else if (encoded.pass_distortions.len == pass_count) {
             for (encoded.pass_distortions) |*value| value.* *= weight;
         } else {
@@ -2376,8 +2512,16 @@ fn buildTileRpclEncodeArtifactsIsoMqDeferredRates(
     options: PacketScaffoldOptions,
     style: ebcot.CodeBlockStyle,
 ) !TileRpclEncodeArtifacts {
+    // One tile over the whole image, on several threads: the RCT and the
+    // 5/3 levels run on all of them, as the single-tile encoder's do.
+    const whole_image = tile.rect.x0 == 0 and tile.rect.y0 == 0 and
+        tile.rect.width() == source.width and tile.rect.height() == source.height;
+    const parallel_front = options.front_end == null and options.rgb_transform == .rct and
+        options.threads > 1 and whole_image;
     var rct_tile = if (options.front_end) |front_end|
         try front_end.build(front_end.context, allocator, source, tile, requested_levels)
+    else if (parallel_front)
+        RctTile{ .tile = tile, .planes = try color.forwardRctThreaded(allocator, source, options.threads) }
     else switch (options.rgb_transform) {
         .rct => try forwardRctTile(allocator, source, tile),
         .none => try forwardLevelShiftedTile(allocator, source, tile),
@@ -2387,6 +2531,15 @@ fn buildTileRpclEncodeArtifactsIsoMqDeferredRates(
     // A front end returns already-transformed planes at the requested depth.
     const levels = if (options.front_end != null)
         requested_levels
+    else if (parallel_front)
+        try wavelet_int.forward53Parallel(
+            allocator,
+            .{ rct_tile.planes.planes[0], rct_tile.planes.planes[1], rct_tile.planes.planes[2] },
+            rct_tile.planes.width,
+            rct_tile.planes.height,
+            requested_levels,
+            options.threads,
+        )
     else
         try forward53TileInPlace(allocator, &rct_tile, requested_levels);
 
@@ -2555,6 +2708,9 @@ fn buildTileRpclEncodeArtifactsFromTransformedTile(
     // every tile is encoded (applyGridPcrdTargets); store the per-pass
     // distortions now, while the tile's RCT planes are alive.
     if (ratesNeedDistortions(options.rate_count, scaffold.layers, style)) {
+        if (style.high_throughput) {
+            try codeEstimatedHighThroughputSets(allocator, rct_tile, &catalog, style, scaffold.band_weights, options, scaffold.layers);
+        }
         try storeCatalogPassDistortions(allocator, rct_tile, &catalog, style, scaffold.band_weights);
     }
     try validateEncodedBlockCatalogCoversTile(allocator, scaffold, catalog);
@@ -2563,19 +2719,27 @@ fn buildTileRpclEncodeArtifactsFromTransformedTile(
     var index_moved = false;
     errdefer if (!index_moved) index.deinit();
 
-    var stream = try buildTileRpclPacketStream(allocator, scaffold, catalog, index, bit_depth);
+    // The grid-wide HT allocation rebuilds every tile's packets from the
+    // sets it keeps: none to build from the lossless ones meanwhile.
+    const deferred_stream = style.high_throughput and ratesNeedDistortions(options.rate_count, scaffold.layers, style);
+    var stream = if (deferred_stream)
+        TileRpclPacketStream{ .allocator = allocator, .bytes = &.{}, .packet_lengths = &.{}, .packet_header_lengths = &.{} }
+    else
+        try buildTileRpclPacketStream(allocator, scaffold, catalog, index, bit_depth);
     var stream_moved = false;
     errdefer if (!stream_moved) stream.deinit();
 
-    try reorderTilePacketStreamFromRpcl(
-        allocator,
-        &stream,
-        scaffold.plan,
-        scaffold.components,
-        scaffold.layers,
-        options.packet_order,
-    );
-    try validateTilePacketStream(allocator, scaffold, catalog, index, stream, bit_depth, options.packet_order);
+    if (!deferred_stream) {
+        try reorderTilePacketStreamFromRpcl(
+            allocator,
+            &stream,
+            scaffold.plan,
+            scaffold.components,
+            scaffold.layers,
+            options.packet_order,
+        );
+        try validateTilePacketStream(allocator, scaffold, catalog, index, stream, bit_depth, options.packet_order);
+    }
 
     scaffold_moved = true;
     catalog_moved = true;

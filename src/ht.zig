@@ -401,12 +401,16 @@ pub fn Encoder(comptime Coefficient: type) type {
             const cleanup = try self.encodeCleanup(samples, stride, width, height, @intCast(plane));
             var set = Set{ .plane = plane, .cleanup = cleanup };
             const area = width * height;
-            try self.flags.resize(self.allocator, 2 * area);
+            // The flags, the neighbour map, and the significance with a zero
+            // guard around it.
+            const guarded_area = (width + 2) * (height + 2);
+            try self.flags.resize(self.allocator, 2 * area + guarded_area);
             const flags = self.flags.items[0..area];
-            set.distortion = cleanupDistortion(samples, stride, width, height, plane, flags);
+            const distortion = planeDistortion(Coefficient, samples, stride, width, height, plane, flags);
+            set.distortion = .{ distortion.none, distortion.cleanup, distortion.cleanup, distortion.cleanup };
             if (plane == 0 or cleanup.bytes.len == 0) return set;
             const near = self.flags.items[area..][0..area];
-            markSignificantNeighbours(flags, near, width, height, vertical_causal);
+            markSignificantNeighbours(flags, near, self.flags.items[2 * area ..][0..guarded_area], width, height, vertical_causal);
             // SigProp at most two bits a sample, MagRef one, and a stuffing
             // bit per seven of either.
             const sig_prop_capacity = area / 4 + area / 28 + 24;
@@ -416,7 +420,8 @@ pub fn Encoder(comptime Coefficient: type) type {
             var sig_prop = MagSgnWriter{ .bytes = self.refinement.items[0..sig_prop_capacity] };
             var mag_ref = MagRefWriter{ .bytes = self.refinement.items[sig_prop_capacity..] };
             set.distortion[2] = set.distortion[1] - encodeSigProp(Coefficient, samples, stride, width, height, plane, vertical_causal, flags, near, &sig_prop);
-            set.distortion[3] = set.distortion[2] - encodeMagRef(Coefficient, samples, stride, width, height, plane, flags, &mag_ref);
+            encodeMagRef(flags, width, height, &mag_ref);
+            set.distortion[3] = set.distortion[2] - distortion.mag_ref_removed;
             sig_prop.finishWithZeros();
             mag_ref.finish();
             set.sig_prop_length = sig_prop.position;
@@ -596,43 +601,110 @@ inline fn squaredError(mu: u64, estimate: u64) f64 {
     return difference * difference;
 }
 
-/// The distortion with no pass and after the cleanup pass ending at
-/// `plane`, marking each sample the cleanup pass makes significant in
-/// `flags` (and clearing the rest) for SigProp and MagRef.
-fn cleanupDistortion(samples: anytype, stride: usize, width: usize, height: usize, plane: u8, flags: []u8) [4]f64 {
-    var none: f64 = 0;
-    var after: f64 = 0;
+/// `planeDistortion`'s sums, in squared quantization steps.
+const PlaneDistortion = struct {
+    none: f64,
+    cleanup: f64,
+    /// What the MagRef pass then removes.
+    mag_ref_removed: f64,
+};
+
+/// The flag of `flag_next_bit`: bit `plane - 1` of the magnitude, set for
+/// every sample, which SigProp and MagRef code.
+const flag_next_bit: u8 = 0x10;
+
+/// The distortion with no pass, after the cleanup pass ending at `plane`,
+/// and what MagRef then removes, a vector of samples at a time; marks in
+/// `flags` each sample the cleanup pass makes significant, its sign, and its
+/// bit `plane - 1` (the rest cleared) for SigProp and MagRef.
+fn planeDistortion(comptime Coefficient: type, samples: []const Coefficient, stride: usize, width: usize, height: usize, plane: u8, flags: []u8) PlaneDistortion {
+    const Magnitude = @Int(.unsigned, @bitSizeOf(Coefficient));
+    const lanes = comptime std.simd.suggestVectorLength(Coefficient) orelse 4;
+    const Lanes = @Vector(lanes, Magnitude);
+    const Floats = @Vector(lanes, f64);
+    const Flags = @Vector(lanes, u8);
+    const Shift = std.math.Log2Int(Magnitude);
+    const zero: Lanes = @splat(0);
+    // The decoder's midpoint at the cleanup plane, and at the MagRef one.
+    const half: Magnitude = if (plane == 0) 0 else @as(Magnitude, 1) << @intCast(plane - 1);
+    const refined_half: Magnitude = if (plane < 2) 0 else @as(Magnitude, 1) << @intCast(plane - 2);
+    const shift: Shift = @intCast(plane);
+    const refined_shift: Shift = @intCast(plane -| 1);
+    var none: Floats = @splat(0);
+    var cleanup: Floats = @splat(0);
+    var removed: Floats = @splat(0);
+    var tail_none: f64 = 0;
+    var tail_cleanup: f64 = 0;
+    var tail_removed: f64 = 0;
     for (0..height) |y| {
-        for (samples[y * stride ..][0..width], flags[y * width ..][0..width]) |sample, *flag| {
-            const mu: u64 = @abs(sample);
-            const significant = plane < 64 and (mu >> @intCast(plane)) != 0;
-            flag.* = if (significant) flag_significant | (if (sample < 0) flag_negative else 0) else 0;
-            none += squaredError(mu, 0);
-            after += squaredError(mu, reconstructed(mu, plane));
+        const row = samples[y * stride ..][0..width];
+        const row_flags = flags[y * width ..][0..width];
+        var x: usize = 0;
+        while (x + lanes <= width) : (x += lanes) {
+            const sample: @Vector(lanes, Coefficient) = row[x..][0..lanes].*;
+            const mu: Lanes = @abs(sample);
+            const significant = (mu >> @splat(shift)) != zero;
+            const estimate = @select(Magnitude, significant, ((mu >> @splat(shift)) << @splat(shift)) | @as(Lanes, @splat(half)), zero);
+            const refined = ((mu >> @splat(refined_shift)) << @splat(refined_shift)) | @as(Lanes, @splat(refined_half));
+            const value: Floats = @floatFromInt(mu);
+            const error_cleanup = value - @as(Floats, @floatFromInt(estimate));
+            const error_refined = value - @as(Floats, @floatFromInt(refined));
+            none += value * value;
+            cleanup += error_cleanup * error_cleanup;
+            removed += @select(f64, significant, error_cleanup * error_cleanup - error_refined * error_refined, @as(Floats, @splat(0)));
+            const negative = @select(u8, sample < @as(@Vector(lanes, Coefficient), @splat(0)), @as(Flags, @splat(flag_negative)), @as(Flags, @splat(0)));
+            const next_bit = @select(u8, ((mu >> @splat(refined_shift)) & @as(Lanes, @splat(1))) != zero, @as(Flags, @splat(flag_next_bit)), @as(Flags, @splat(0)));
+            const marked = @select(u8, significant, @as(Flags, @splat(flag_significant)), @as(Flags, @splat(0)));
+            row_flags[x..][0..lanes].* = marked | negative | (if (plane == 0) @as(Flags, @splat(0)) else next_bit);
+        }
+        while (x < width) : (x += 1) {
+            const sample = row[x];
+            const mu: Magnitude = @abs(sample);
+            const significant = (mu >> shift) != 0;
+            const estimate: Magnitude = if (significant) ((mu >> shift) << shift) | half else 0;
+            const refined: Magnitude = ((mu >> refined_shift) << refined_shift) | refined_half;
+            const value: f64 = @floatFromInt(mu);
+            const error_cleanup = value - @as(f64, @floatFromInt(estimate));
+            const error_refined = value - @as(f64, @floatFromInt(refined));
+            tail_none += value * value;
+            tail_cleanup += error_cleanup * error_cleanup;
+            if (significant) tail_removed += error_cleanup * error_cleanup - error_refined * error_refined;
+            var flag: u8 = if (significant) flag_significant else 0;
+            if (sample < 0) flag |= flag_negative;
+            if (plane != 0 and ((mu >> refined_shift) & 1) != 0) flag |= flag_next_bit;
+            row_flags[x] = flag;
         }
     }
-    return .{ none, after, after, after };
+    return .{
+        .none = @reduce(.Add, none) + tail_none,
+        .cleanup = @reduce(.Add, cleanup) + tail_cleanup,
+        .mag_ref_removed = if (plane == 0) 0 else @reduce(.Add, removed) + tail_removed,
+    };
 }
 
 /// Marks in `near` each sample with a cleanup-significant sample among its
 /// eight neighbours, leaving out the next stripe's under the vertically
 /// causal context: `sigPropNeighbourhood` before SigProp makes any sample
-/// significant.
-fn markSignificantNeighbours(flags: []const u8, near: []u8, width: usize, height: usize, vertical_causal: bool) void {
+/// significant. `guarded` holds the significance with a zero guard.
+fn markSignificantNeighbours(flags: []const u8, near: []u8, guarded: []u8, width: usize, height: usize, vertical_causal: bool) void {
+    const guarded_width = width + 2;
+    @memset(guarded, 0);
     for (0..height) |y| {
-        const row = near[y * width ..][0..width];
-        @memset(row, 0);
-        const first = if (y > 0) y - 1 else y;
+        const row = guarded[(y + 1) * guarded_width + 1 ..][0..width];
+        for (row, flags[y * width ..][0..width]) |*out, flag| out.* = flag & flag_significant;
+    }
+    for (0..height) |y| {
+        const above = guarded[y * guarded_width ..][0..guarded_width];
+        const here = guarded[(y + 1) * guarded_width ..][0..guarded_width];
         // The next row unless it starts the next stripe, which the
         // vertically causal context leaves out.
-        const last = if (y + 1 < height and !(vertical_causal and (y + 1) % 4 == 0)) y + 1 else y;
-        for (first..last + 1) |ny| {
-            const line = flags[ny * width ..][0..width];
-            for (row, 0..) |*out, x| {
-                var any = (if (x > 0) line[x - 1] else 0) | (if (x + 1 < width) line[x + 1] else 0);
-                if (ny != y) any |= line[x];
-                out.* |= any & flag_significant;
-            }
+        const below_kept = !(vertical_causal and (y + 1) % 4 == 0);
+        const below = guarded[(y + 2) * guarded_width ..][0..guarded_width];
+        const out = near[y * width ..][0..width];
+        for (out, 0..) |*value, x| {
+            var any = above[x] | above[x + 1] | above[x + 2] | here[x] | here[x + 2];
+            if (below_kept) any |= below[x] | below[x + 1] | below[x + 2];
+            value.* = any;
         }
     }
 }
@@ -644,7 +716,6 @@ fn markSignificantNeighbours(flags: []const u8, near: []u8, width: usize, height
 /// samples next to a cleanup-significant one; only the others need a look
 /// at the samples this pass made significant.
 fn encodeSigProp(comptime Coefficient: type, samples: []const Coefficient, stride: usize, width: usize, height: usize, plane: u8, vertical_causal: bool, flags: []u8, near: []const u8, writer: *MagSgnWriter) f64 {
-    const bit_plane: u6 = @intCast(plane - 1);
     var removed: f64 = 0;
     var stripe: usize = 0;
     while (stripe < height) : (stripe += 4) {
@@ -663,16 +734,15 @@ fn encodeSigProp(comptime Coefficient: type, samples: []const Coefficient, strid
                     const location = y * width + x;
                     if ((flags[location] & flag_significant) != 0) continue;
                     if (near[location] == 0 and !sigPropNeighbourhood(flags, width, width, below_limit, x, y)) continue;
-                    const sample = samples[y * stride + x];
-                    const mu: u64 = @abs(sample);
-                    const bit = (mu >> bit_plane) & 1;
+                    const bit: u64 = @intFromBool((flags[location] & flag_next_bit) != 0);
                     magnitude_bits |= bit << @intCast(magnitude_count);
                     magnitude_count += 1;
                     if (bit == 1) {
                         flags[location] |= flag_refinement_bit;
+                        const mu: u64 = @abs(samples[y * stride + x]);
                         removed += squaredError(mu, 0) - squaredError(mu, reconstructed(mu, plane - 1));
                         // The signs follow in the same order.
-                        sign_bits |= @as(u64, @intFromBool(sample < 0)) << @intCast(sign_count);
+                        sign_bits |= @as(u64, @intFromBool((flags[location] & flag_negative) != 0)) << @intCast(sign_count);
                         sign_count += 1;
                     }
                 }
@@ -686,28 +756,53 @@ fn encodeSigProp(comptime Coefficient: type, samples: []const Coefficient, strid
 
 /// The HT MagRef pass for bit-plane `plane - 1` (7.5 run backward): bit
 /// `plane - 1` of each sample the cleanup pass made significant, in stripe
-/// scan order. Returns the distortion it removes.
-fn encodeMagRef(comptime Coefficient: type, samples: []const Coefficient, stride: usize, width: usize, height: usize, plane: u8, flags: []const u8, writer: *MagRefWriter) f64 {
-    const bit_plane: u6 = @intCast(plane - 1);
-    var removed: f64 = 0;
+/// scan order, a stripe column's bits at a time.
+fn encodeMagRef(flags: []const u8, width: usize, height: usize, writer: *MagRefWriter) void {
     var stripe: usize = 0;
     while (stripe < height) : (stripe += 4) {
-        const stripe_end = @min(stripe + 4, height);
+        const rows = @min(4, height - stripe);
+        var bits: u64 = 0;
+        var count: u8 = 0;
         for (0..width) |x| {
-            var bits: u64 = 0;
-            var count: u8 = 0;
-            for (stripe..stripe_end) |y| {
-                if ((flags[y * width + x] & flag_significant) == 0) continue;
-                const mu: u64 = @abs(samples[y * stride + x]);
-                bits |= ((mu >> bit_plane) & 1) << @intCast(count);
-                count += 1;
-                removed += squaredError(mu, reconstructed(mu, plane)) - squaredError(mu, reconstructed(mu, plane - 1));
+            var significant: u8 = 0;
+            var values: u8 = 0;
+            for (0..rows) |row| {
+                const flag = flags[(stripe + row) * width + x];
+                significant |= (flag & flag_significant) << @intCast(row);
+                values |= ((flag & flag_next_bit) >> 4) << @intCast(row);
             }
-            writer.put(bits, count);
+            const packed_bits = packed_nibbles[(@as(usize, significant) << 4) | values];
+            bits |= @as(u64, packed_bits) << @intCast(count);
+            count += @popCount(significant);
+            if (count >= 32) {
+                writer.put(bits & 0xffff_ffff, 32);
+                bits >>= 32;
+                count -= 32;
+            }
         }
+        writer.put(bits, count);
     }
-    return removed;
 }
+
+/// The bits of a nibble `values` where a mask nibble is set, packed down:
+/// indexed by `mask << 4 | values`.
+const packed_nibbles = blk: {
+    @setEvalBranchQuota(10_000);
+    var table: [256]u8 = undefined;
+    for (0..256) |index| {
+        const mask = index >> 4;
+        var out: u8 = 0;
+        var position: u3 = 0;
+        for (0..4) |bit| {
+            if ((mask >> bit) & 1 != 0) {
+                out |= @as(u8, @intCast((index >> bit) & 1)) << position;
+                position += 1;
+            }
+        }
+        table[index] = out;
+    }
+    break :blk table;
+};
 
 /// MagRef bits least significant first into bytes stored backward from the
 /// end of `bytes` (7.1.6): after a byte above 0x8F, a byte whose seven low

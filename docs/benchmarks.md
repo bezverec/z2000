@@ -46,6 +46,25 @@ On Windows, the equivalent harness can include the irreversible profile:
   -OutDir .\zig-out\bench-compare -Runs 8 -Warmup 2 -Threads 16 -IncludeLossy
 ```
 
+## 2026-10-28: Intel Core i5-14500, HT rate targets by estimated planes
+
+Base `76051f6`, `bench-rgb-2048.tif`, `--ht --rates 8`, ReleaseFast,
+interleaved rounds, medians of `--timings`:
+
+| Threads | Rounds | Total |
+| --- | --- | --- |
+| 1 | 5 | 688.5 -> 341.6 ms |
+| 20 | 9 | 133.5 -> 73.6 ms |
+
+Same files at rates 2, 8 (the same `--rates 8` bytes before and after the
+vector refinement passes) and quality within noise of the full search
+(rate 8: 1,248,266 bytes at 27.79 dB against 1,247,618 at 27.65; rate 32:
+283,774 at 27.23 against 283,513 at 27.23; 9/7 rate 8: 1,019,951 at 29.01
+against 1,020,800 at 29.01). A window of two planes instead of three was
+another 10% faster and 0.06 to 0.08 dB worse; rejected. Before the vector
+passes, at one thread the three sets' coding was cleanup 83 ms, neighbour
+map 60, distortion 55, MagRef 52, SigProp 46.
+
 ## 2026-10-28: Intel Core i5-14500, HT word writers and vector MagSgn
 
 Base `17f9a5d`, `bench-rgb-2048.tif`, ReleaseFast, interleaved rounds (17),

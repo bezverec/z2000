@@ -15087,6 +15087,19 @@ test "HT encoder codes wide components through the native encoder" {
         for (source.planes, decoded.planes) |expected, actual| {
             try std.testing.expectEqualSlices(i64, expected.samples, actual.samples);
         }
+        // Rate targets pick among every HT set of the wide blocks.
+        if (case.options.component_coding.len == 0) {
+            var rated = case.options;
+            rated.rate_count = 1;
+            rated.rates[0] = 4;
+            const rated_stream = try codestream.encodeNativeLosslessWithOptions(allocator, source, rated);
+            defer allocator.free(rated_stream);
+            // Headers aside, six tiles' of them over a kilobyte.
+            try std.testing.expect(rated_stream.len < stream.len / 4 + 1500);
+            var rated_decoded = try codestream.decodeLosslessNative(allocator, rated_stream, .{});
+            defer rated_decoded.deinit();
+            try std.testing.expectEqual(source.planes.len, rated_decoded.planes.len);
+        }
     }
 }
 

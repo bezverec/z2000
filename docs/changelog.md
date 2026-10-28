@@ -5,6 +5,24 @@ entries are grouped by development milestone rather than semantic version.
 
 ## Unreleased
 
+### Faster HT Rate Targets (0.3.0 line)
+
+- A rate-targeted HT block is first coded at cleanup plane 0 only, with an
+  estimate of the cleanup pass at every other plane from its bit-length
+  histogram (bytes scaled to the lossless pass, the error of the samples
+  left insignificant exactly and of the others as uniform). One slope
+  threshold over a tile's estimates at the final rate picks a plane per
+  block, and only the sets of that plane and the two beside it are coded
+  exactly, on all threads, before the grid-wide allocation picks among
+  them; the estimate's plane is within one of the full search's for nearly
+  every block. The SigProp and MagRef coders take their bits from flags a
+  vector pass sets, with the distortions, and MagRef packs a stripe
+  column's bits from a table; a single tile over the whole image gets the
+  threaded RCT and 5/3, and the lossless packets the allocation replaces
+  are no longer built. `--ht --rates 8` on the 2048x2048 RGB image: 342 ms
+  at one thread, 74 at twenty (was 689 and 133), at the same quality and
+  size. The wide encoder still codes every set.
+
 ### HT Rate Targets (0.3.0 line)
 
 - `--rates` now works with `--ht`. Each block offers an HT set at every
