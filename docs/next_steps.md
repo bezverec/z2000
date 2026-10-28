@@ -1108,9 +1108,11 @@ coding every quantized band whole; Kakadu, OpenJPEG, and z2000 decode it
 exactly as the Part 1 stream of the same quantization (89 inputs and
 option sets), Grok within 2 LSB as on Kakadu's own HT streams. At z2000's
 default step sizes (Kakadu's `Qstep` 1/256 at 8 bits) the 2048x2048 RGB
-image codes to 8.13 MB, as Kakadu's `Cmodes=HT` default does. Next, in
-order: a quality setting for the 9/7 step sizes, rate targets through
-complexity control (HT SigProp and MagRef passes, then MULTIHT streams of
+image codes to 8.13 MB, as Kakadu's `Cmodes=HT` default does. Done,
+2026-10-28: `--qstep`, the 9/7 base step relative to the sample range
+(Kakadu's `Qstep`), the quality setting of lossy HT; file sizes and PSNR
+follow Kakadu's at the same `Qstep` (`changelog.md`). Next, in order: rate
+targets through complexity control (HT SigProp and MagRef passes, then MULTIHT streams of
 z2000's own making), and encoder and decoder speed alongside.
 
 The HT packet headers need one rule T.814 leaves implicit. Kakadu's

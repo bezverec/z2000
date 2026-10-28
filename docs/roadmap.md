@@ -163,7 +163,7 @@ Order, each step under the normal slice gates:
    file size. Quantization-driven lossy done, 2026-10-28: `--ht` with the
    9/7 transform codes each quantized band whole (HTIRV, Ccap15 bit 5);
    Kakadu, OpenJPEG, and z2000 decode it exactly as the Part 1 stream of
-   the same quantization.
+   the same quantization; `--qstep` (Kakadu's `Qstep`) sets its quality.
 5. Later: MIXED and MULTIHT streams and lossless JP2 <-> JPH transcoding,
    which z2000 can do at the quantized-sample level with both block coders.
    MIXED done, 2026-10-28 (all 40 WG1 HT streams decode).

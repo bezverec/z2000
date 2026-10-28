@@ -226,6 +226,8 @@ Important `tiff-to-jp2` options:
 - `--mct rct|ict|none`
 - `--transform 5-3|9-7`
 - `--qstyle none|scalar-derived|scalar-expounded`
+- `--qstep STEP` (9/7 base step relative to the sample range, Kakadu's
+  `Qstep`; default 1/2^depth)
 - `--tile-parts none|R|L|C|P`
 - `--sop`, `--eph`, `--ppm`, `--ppt`, `--tlm`
 - `--t1-backend iso-mq|legacy-mq`

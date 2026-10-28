@@ -267,6 +267,21 @@ pub const WaveletTransform = enum(u8) {
     }
 };
 
+/// The 9/7 step sizes an encoder writes: the QCD style, and the base step
+/// relative to the sample range (Kakadu's `Qstep`), each band's step being
+/// that over the band's 9/7 synthesis norm; null is 2^-depth, the steps
+/// OpenJPEG writes by default.
+pub const Quantization = struct {
+    style: QuantizationStyle,
+    base_step: ?f64 = null,
+
+    /// The base step in units of 2^-depth.
+    fn scale(self: Quantization, bit_depth: u8) f64 {
+        const step = self.base_step orelse return 1;
+        return std.math.ldexp(step, bit_depth);
+    }
+};
+
 pub const QuantizationStyle = enum(u5) {
     none = 0,
     scalar_derived = 1,
@@ -336,6 +351,9 @@ pub const LosslessOptions = struct {
     mct: MultipleComponentTransform = .rct,
     transform: WaveletTransform = .reversible_5_3,
     quantization: QuantizationStyle = .none,
+    /// With the 9/7 transform, the base step relative to the sample range
+    /// (`Quantization.base_step`).
+    base_step: ?f64 = null,
     guard_bits: u8 = 2,
     /// Absolute SIZ image and tile-partition origins. Nonzero values are
     /// currently public only through the sampled planar encoder.
@@ -380,6 +398,10 @@ pub const LosslessOptions = struct {
     /// Maxshift regions of interest, written as main-header RGN markers by
     /// the wide native encoder only; every other encoder refuses them.
     roi_regions: []const RoiRegion = &.{},
+
+    pub fn stepSizes(self: LosslessOptions) Quantization {
+        return .{ .style = self.quantization, .base_step = self.base_step };
+    }
 
     pub fn precinctForResolution(self: LosslessOptions, resolution: usize) PrecinctSize {
         const count = @as(usize, self.precinct_count);
@@ -886,6 +908,7 @@ pub fn encodeNativeLosslessWithOptions(
     options: LosslessOptions,
 ) ![]u8 {
     try validateHighThroughputRequest(options);
+    try validateBaseStep(options);
     if (!nativeLayoutIsUniform(source) or options.component_coding.len != 0 or options.roi_regions.len != 0) {
         return encodeNativeWideComponentwise(allocator, source, options);
     }
@@ -2008,7 +2031,7 @@ fn encodeLosslessPlanarMultiTile(
         .rct_alpha = rct_alpha,
         .irreversible = irreversible,
         .ict_alpha = ict_alpha,
-        .quantization = options.quantization,
+        .quantization = options.stepSizes(),
     };
     // The tile pipeline checks the grid against these dimensions; the samples
     // come from the front end's own planes.
@@ -2036,7 +2059,7 @@ const PlanarTileFrontEndContext = struct {
     rct_alpha: bool,
     irreversible: bool = false,
     ict_alpha: bool = false,
-    quantization: QuantizationStyle = .none,
+    quantization: Quantization = .{ .style = .none },
 };
 
 fn buildPlanarTransformedTile(
@@ -2073,7 +2096,7 @@ fn forwardIrreversiblePlanarRegion(
     allocator: std.mem.Allocator,
     planar: color.SamplePlanes,
     levels: u8,
-    quantization: QuantizationStyle,
+    quantization: Quantization,
     ict: bool,
     x0: u32,
     y0: u32,
@@ -3015,7 +3038,7 @@ fn forwardIrreversibleQuantizedPlanes(
         allocator,
         rgb,
         levels,
-        options.quantization,
+        options.stepSizes(),
         options.mct,
         0,
         0,
@@ -3115,7 +3138,7 @@ fn forwardIrreversibleQuantizedPlanesForRegion(
     allocator: std.mem.Allocator,
     rgb: image.RgbImage,
     levels: u8,
-    quantization: QuantizationStyle,
+    quantization: Quantization,
     mct: MultipleComponentTransform,
     x0: u32,
     y0: u32,
@@ -3132,7 +3155,7 @@ fn forwardIrreversibleQuantizedPlanesForRegionMeasured(
     allocator: std.mem.Allocator,
     rgb: image.RgbImage,
     levels: u8,
-    quantization: QuantizationStyle,
+    quantization: Quantization,
     mct: MultipleComponentTransform,
     x0: u32,
     y0: u32,
@@ -3231,7 +3254,7 @@ fn forwardIrreversibleQuantizedPlanesForRegionMeasured(
 /// region, then runs the same colour front end + 9/7 + deadzone quantization the
 /// single-tile path uses, retaining the tile's reference-grid lifting parity.
 const IrreversibleTileFrontEndContext = struct {
-    quantization: QuantizationStyle,
+    quantization: Quantization,
     mct: MultipleComponentTransform,
 };
 
@@ -3268,7 +3291,7 @@ fn irreversibleNominalBitplaneTable(
     bit_depth: u8,
     levels: u8,
     guard_bits: u8,
-    quantization: QuantizationStyle,
+    quantization: Quantization,
 ) ![33][4]u8 {
     var table: [33][4]u8 = @splat(.{ 0, 0, 0, 0 });
     if (levels > 32) return CodestreamError.UnsupportedPayload;
@@ -3307,7 +3330,7 @@ fn irreversibleNominalBitplaneTable(
 fn irreversibleBandWeightTable(
     bit_depth: u8,
     levels: u8,
-    quantization: QuantizationStyle,
+    quantization: Quantization,
 ) ![33][4]f64 {
     var table: [33][4]f64 = @splat(.{ 0, 0, 0, 0 });
     if (levels > 32) return CodestreamError.UnsupportedPayload;
@@ -4988,7 +5011,7 @@ fn componentCatalogBlockWorker(job: *ComponentCatalogBlockJob) void {
             job.bands[block.band_index].level,
             job.options.transform,
             job.options.guard_bits,
-            job.options.quantization,
+            job.options.stepSizes(),
             dwtLevelsFromBands(job.bands),
         ) catch |err| {
             job.result = err;
@@ -5107,7 +5130,7 @@ fn componentCatalogAllBlockWorker(job: *ComponentCatalogAllBlockJob) void {
             job.bands[block.band_index].level,
             job.options.transform,
             job.options.guard_bits,
-            job.options.quantization,
+            job.options.stepSizes(),
             dwtLevelsFromBands(job.bands),
         ) catch |err| {
             job.result = err;
@@ -6137,7 +6160,7 @@ fn inverseNativeIrreversiblePlane(
     for (bands, deltas) |band, *delta| {
         const step = signalledQcdBandStep(component_qcd, levels, band.kind, band.level) orelse
             signalledHeaderBandStep(header, band.kind, band.level) orelse
-            try irreversibleBandStepSizeFor(header.quantization, depth, band.kind, band.level, levels);
+            try irreversibleBandStepSizeFor(.{ .style = header.quantization }, depth, band.kind, band.level, levels);
         delta.* = irreversibleBandDelta(depth, band.kind, step);
     }
     const plane = try allocator.alloc(f32, try std.math.mul(usize, width, height));
@@ -6202,7 +6225,7 @@ fn inverseNativeIrreversiblePlaneF64(
     for (bands, deltas) |band, *delta| {
         const step = signalledQcdBandStep(component_qcd, levels, band.kind, band.level) orelse
             signalledHeaderBandStep(header, band.kind, band.level) orelse
-            try irreversibleBandStepSizeFor(header.quantization, depth, band.kind, band.level, levels);
+            try irreversibleBandStepSizeFor(.{ .style = header.quantization }, depth, band.kind, band.level, levels);
         delta.* = irreversibleBandDelta(depth, band.kind, step);
     }
     const pixels = try std.math.mul(usize, width, height);
@@ -10267,7 +10290,7 @@ fn bandNominalBitplanesForHeader(
         band_level,
         header.transform,
         header.guard_bits,
-        header.quantization,
+        .{ .style = header.quantization },
         levels,
     );
     return addRoiShiftToNominalBitplanes(nominal, componentRoiShiftForHeader(header, component));
@@ -16040,7 +16063,7 @@ const IrreversibleReconstruction = struct {
                     band.level,
                 ) orelse signalledHeaderBandStep(header, band.kind, band.level) orelse
                     try irreversibleBandStepSizeFor(
-                        header.quantization,
+                        .{ .style = header.quantization },
                         component_depth,
                         band.kind,
                         band.level,
@@ -16319,7 +16342,7 @@ fn decodeIrreversiblePlanarFromBlockCatalogMeasured(
                 band.level,
             ) orelse signalledHeaderBandStep(header, band.kind, band.level) orelse
                 try irreversibleBandStepSizeFor(
-                    header.quantization,
+                    .{ .style = header.quantization },
                     component_depths[component],
                     band.kind,
                     band.level,
@@ -21432,7 +21455,7 @@ fn highThroughputMagnitudeBound(depth: u8, levels: u8, options: LosslessOptions)
         for (kinds) |kind| {
             // The LL band is at level NL; the detail bands from level 1.
             if (kind != .ll and level == 0) continue;
-            const step = try irreversibleBandStepSizeFor(options.quantization, depth, kind, level, levels);
+            const step = try irreversibleBandStepSizeFor(options.stepSizes(), depth, kind, level, levels);
             const bitplanes = options.guard_bits + step.exponent - 1;
             deepest = @max(deepest, bitplanes);
             bound = @max(bound, (bitplanes + 1) -| level);
@@ -21561,16 +21584,16 @@ fn appendQcd(
             // NL LL band; decoders derive every other subband via E-5.
             try appendU16Be(allocator, out, 3 + 2);
             try out.append(allocator, qcdStyleByte(options));
-            try appendQcdScalarValue(allocator, out, bit_depth, .ll, levels);
+            try appendQcdScalarValue(allocator, out, bit_depth, .ll, levels, options.stepSizes());
             return;
         }
         try appendU16Be(allocator, out, 3 + 2 * bands);
         try out.append(allocator, qcdStyleByte(options));
-        try appendQcdScalarValue(allocator, out, bit_depth, .ll, levels);
+        try appendQcdScalarValue(allocator, out, bit_depth, .ll, levels, options.stepSizes());
         var level: u8 = levels;
         while (level > 0) : (level -= 1) {
             inline for (.{ subband.Kind.hl, subband.Kind.lh, subband.Kind.hh }) |kind| {
-                try appendQcdScalarValue(allocator, out, bit_depth, kind, level);
+                try appendQcdScalarValue(allocator, out, bit_depth, kind, level, options.stepSizes());
             }
         }
         return;
@@ -21712,8 +21735,9 @@ fn appendQcdScalarValue(
     bit_depth: u8,
     kind: subband.Kind,
     band_level: u8,
+    quantization: Quantization,
 ) !void {
-    const step = try irreversibleBandStepSize(bit_depth, kind, band_level);
+    const step = try irreversibleBandStepSize(bit_depth, kind, band_level, quantization.scale(bit_depth));
     const value = (@as(u16, step.exponent) << 11) | step.mantissa;
     try appendU16Be(allocator, out, value);
 }
@@ -23342,7 +23366,7 @@ fn buildComponentRpclShadowCatalog(
             bands[block.band_index].level,
             options.transform,
             options.guard_bits,
-            options.quantization,
+            options.stepSizes(),
             dwtLevelsFromBands(bands),
         );
         catalog_blocks[index] = try buildRpclShadowBlock(
@@ -24792,6 +24816,7 @@ fn validateSamplesFitDepth(samples: []const u16, bit_depth: u8) !void {
 }
 
 fn validateLosslessRequest(grid: tile_grid.Grid, options: LosslessOptions) !void {
+    try validateBaseStep(options);
     if (options.ppm and options.ppt) return CodestreamError.UnsupportedPayload;
     if (options.poc_in_tile_header and options.poc_records.len == 0) {
         return CodestreamError.InvalidCodestream;
@@ -25605,7 +25630,7 @@ fn encodeLosslessMultiTileMeasured(
         .cprl => .cprl,
     };
     var irreversible_context = IrreversibleTileFrontEndContext{
-        .quantization = encode_options.quantization,
+        .quantization = encode_options.stepSizes(),
         .mct = encode_options.mct,
     };
     const front_end: ?tile_pipeline.TileFrontEnd = planar_front_end orelse if (encode_options.transform == .irreversible_9_7) .{
@@ -25613,11 +25638,11 @@ fn encodeLosslessMultiTileMeasured(
         .build = buildIrreversibleQuantizedTile,
     } else null;
     const nominal_bitplanes: ?[33][4]u8 = if (encode_options.transform == .irreversible_9_7)
-        try irreversibleNominalBitplaneTable(rgb.bit_depth, levels, encode_options.guard_bits, encode_options.quantization)
+        try irreversibleNominalBitplaneTable(rgb.bit_depth, levels, encode_options.guard_bits, encode_options.stepSizes())
     else
         null;
     const band_weights: ?[33][4]f64 = if (encode_options.transform == .irreversible_9_7 and encode_options.rate_count != 0)
-        try irreversibleBandWeightTable(rgb.bit_depth, levels, encode_options.quantization)
+        try irreversibleBandWeightTable(rgb.bit_depth, levels, encode_options.stepSizes())
     else
         null;
     var artifacts = try tile_pipeline.buildTileGridRpclEncodeArtifactsIsoMqParallel(
@@ -25870,6 +25895,15 @@ fn validateTilePartDivisions(value: ?u8) !void {
     switch (actual) {
         'R', 'L', 'C', 'P' => {},
         else => return CodestreamError.InvalidCodestream,
+    }
+}
+
+/// A base step sets the 9/7 step sizes, so it needs that transform; past
+/// the QCD exponent range the step size computation refuses it.
+fn validateBaseStep(options: LosslessOptions) !void {
+    const step = options.base_step orelse return;
+    if (options.transform != .irreversible_9_7 or !std.math.isFinite(step) or step <= 0) {
+        return CodestreamError.UnsupportedPayload;
     }
 }
 
@@ -26165,7 +26199,7 @@ fn pcrdBandWeight(band: subband.Band, options: LosslessOptions, bit_depth: u8, l
             return norm * norm;
         },
         .irreversible_9_7 => {
-            const step = try irreversibleBandStepSizeFor(options.quantization, bit_depth, band.kind, band.level, levels);
+            const step = try irreversibleBandStepSizeFor(options.stepSizes(), bit_depth, band.kind, band.level, levels);
             const weighted = irreversiblePcrdDelta(bit_depth, band.kind, step) * dwt97Norm(opj_level, orient);
             return weighted * weighted;
         },
@@ -26175,7 +26209,7 @@ fn pcrdBandWeight(band: subband.Band, options: LosslessOptions, bit_depth: u8, l
 /// Default scalar-expounded step size for the irreversible 9/7 path,
 /// mirroring OpenJPEG's opj_dwt_calc_explicit_stepsizes with qmfbid == 0
 /// (gain 0 for every band).
-fn irreversibleBandStepSize(bit_depth: u8, kind: subband.Kind, band_level: u8) !BandStepSize {
+fn irreversibleBandStepSize(bit_depth: u8, kind: subband.Kind, band_level: u8, scale: f64) !BandStepSize {
     // z2000 band levels count down from the total level count; OpenJPEG's
     // "level" is the decomposition depth of the band.
     const opj_level: usize = if (kind == .ll) band_level else @as(usize, band_level) - 1;
@@ -26185,9 +26219,12 @@ fn irreversibleBandStepSize(bit_depth: u8, kind: subband.Kind, band_level: u8) !
         .lh => 2,
         .hh => 3,
     };
-    const stepsize = 1.0 / dwt97Norm(opj_level, orient);
+    const stepsize = scale / dwt97Norm(opj_level, orient);
+    // Only a base step (`Quantization.base_step`) reaches past what the QCD
+    // exponent and mantissa can signal.
+    if (!(stepsize * 8192.0 < 1 << 30)) return CodestreamError.UnsupportedPayload;
     const fixed: i32 = @intFromFloat(@floor(stepsize * 8192.0));
-    if (fixed <= 0) return CodestreamError.InvalidCodestream;
+    if (fixed <= 0) return CodestreamError.UnsupportedPayload;
     const log2_fixed: i32 = @as(i32, std.math.log2_int(u32, @intCast(fixed)));
     const p = log2_fixed - 13;
     const n = 11 - log2_fixed;
@@ -26196,7 +26233,7 @@ fn irreversibleBandStepSize(bit_depth: u8, kind: subband.Kind, band_level: u8) !
     else
         fixed << @intCast(n)) & 0x7ff);
     const expn = @as(i32, bit_depth) - p;
-    if (expn <= 0 or expn > 31) return CodestreamError.InvalidCodestream;
+    if (expn <= 0 or expn > 31) return CodestreamError.UnsupportedPayload;
     return .{ .exponent = @intCast(expn), .mantissa = mant };
 }
 
@@ -26205,8 +26242,8 @@ fn irreversibleBandStepSize(bit_depth: u8, kind: subband.Kind, band_level: u8) !
 /// derives epsilon_b = epsilon_0 - (NL - n_b) with the mantissa shared,
 /// where n_b is the band's decomposition depth (z2000 `band_level`, counting
 /// down from the total level count so the deepest triple keeps epsilon_0).
-fn derivedBandStepSize(bit_depth: u8, kind: subband.Kind, band_level: u8, levels: u8) !BandStepSize {
-    const base = try irreversibleBandStepSize(bit_depth, .ll, levels);
+fn derivedBandStepSize(bit_depth: u8, kind: subband.Kind, band_level: u8, levels: u8, scale: f64) !BandStepSize {
+    const base = try irreversibleBandStepSize(bit_depth, .ll, levels, scale);
     if (kind == .ll) return base;
     if (band_level == 0 or band_level > levels) return CodestreamError.InvalidCodestream;
     const exponent = @as(i32, base.exponent) - (@as(i32, levels) - @as(i32, band_level));
@@ -26217,15 +26254,16 @@ fn derivedBandStepSize(bit_depth: u8, kind: subband.Kind, band_level: u8, levels
 /// Step size for one band of the irreversible path under the signalled
 /// quantization style. `.none` is the reversible style and never quantizes.
 fn irreversibleBandStepSizeFor(
-    quantization: QuantizationStyle,
+    quantization: Quantization,
     bit_depth: u8,
     kind: subband.Kind,
     band_level: u8,
     levels: u8,
 ) !BandStepSize {
-    return switch (quantization) {
-        .scalar_expounded => try irreversibleBandStepSize(bit_depth, kind, band_level),
-        .scalar_derived => try derivedBandStepSize(bit_depth, kind, band_level, levels),
+    const scale = quantization.scale(bit_depth);
+    return switch (quantization.style) {
+        .scalar_expounded => try irreversibleBandStepSize(bit_depth, kind, band_level, scale),
+        .scalar_derived => try derivedBandStepSize(bit_depth, kind, band_level, levels, scale),
         .none => CodestreamError.InvalidCodestream,
     };
 }
@@ -26263,7 +26301,7 @@ fn bandNominalBitplanesForTransform(
     band_level: u8,
     transform: WaveletTransform,
     guard_bits: u8,
-    quantization: QuantizationStyle,
+    quantization: Quantization,
     levels: u8,
 ) !u8 {
     // Mb derives from the *signalled* epsilon_b (E-2): under scalar-derived

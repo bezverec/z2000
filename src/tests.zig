@@ -15128,6 +15128,70 @@ test "HT encoder codes quantized 9/7 bands as Part 1 would" {
     }
 }
 
+test "9/7 base step scales every band's step size" {
+    const allocator = std.testing.allocator;
+    const texture = htGrayTextureForTest();
+    var rgb_samples: [64 * 48 * 3]u16 = undefined;
+    for (texture, 0..) |sample, index| {
+        const value: u16 = @intCast(sample);
+        rgb_samples[3 * index] = value;
+        rgb_samples[3 * index + 1] = 255 - value;
+        rgb_samples[3 * index + 2] = (value * 7) % 256;
+    }
+    const rgb = image.RgbImage{ .allocator = allocator, .width = 64, .height = 48, .bit_depth = 8, .samples = &rgb_samples };
+    for ([_]bool{ false, true }) |high_throughput| {
+        const options = codestream.LosslessOptions{ .transform = .irreversible_9_7, .quantization = .scalar_expounded, .mct = .ict, .levels = 3, .high_throughput = high_throughput };
+        const default_stream = try codestream.encodeLosslessWithOptions(allocator, rgb, options);
+        defer allocator.free(default_stream);
+        // The default steps are those of a base step of 2^-depth.
+        var nominal = options;
+        nominal.base_step = 1.0 / 256.0;
+        const nominal_stream = try codestream.encodeLosslessWithOptions(allocator, rgb, nominal);
+        defer allocator.free(nominal_stream);
+        try std.testing.expectEqualSlices(u8, default_stream, nominal_stream);
+
+        var coarse = options;
+        coarse.base_step = 0.05;
+        const coarse_stream = try codestream.encodeLosslessWithOptions(allocator, rgb, coarse);
+        defer allocator.free(coarse_stream);
+        try std.testing.expect(coarse_stream.len < default_stream.len / 2);
+        var decoded = try codestream.decodeLosslessNativeWithOptions(allocator, coarse_stream, .{}, .{});
+        defer decoded.deinit();
+        // Coarser but close to the source: a mean error below 4% of the
+        // range.
+        var error_sum: i64 = 0;
+        for (0..3) |component| {
+            for (decoded.planes[component].samples, 0..) |sample, index| {
+                error_sum += @intCast(@abs(sample - @as(i64, rgb_samples[3 * index + component])));
+            }
+        }
+        try std.testing.expect(error_sum < 10 * @as(i64, rgb_samples.len));
+        if (high_throughput) {
+            // And as the Part 1 stream of the same steps decodes.
+            coarse.high_throughput = false;
+            const part1 = try codestream.encodeLosslessWithOptions(allocator, rgb, coarse);
+            defer allocator.free(part1);
+            var expected = try codestream.decodeLosslessNativeWithOptions(allocator, part1, .{}, .{});
+            defer expected.deinit();
+            for (0..3) |component| {
+                try std.testing.expectEqualSlices(i64, expected.planes[component].samples, decoded.planes[component].samples);
+            }
+        }
+    }
+    // A base step needs the 9/7 transform, a finite positive value, and
+    // step sizes the QCD can signal.
+    const refused = [_]codestream.LosslessOptions{
+        .{ .base_step = 0.01 },
+        .{ .transform = .irreversible_9_7, .quantization = .scalar_expounded, .mct = .ict, .base_step = 0 },
+        .{ .transform = .irreversible_9_7, .quantization = .scalar_expounded, .mct = .ict, .base_step = std.math.inf(f64) },
+        .{ .transform = .irreversible_9_7, .quantization = .scalar_expounded, .mct = .ict, .base_step = 1e-7 },
+        .{ .transform = .irreversible_9_7, .quantization = .scalar_expounded, .mct = .ict, .base_step = 64 },
+    };
+    for (refused) |options| {
+        try std.testing.expectError(codestream.CodestreamError.UnsupportedPayload, codestream.encodeLosslessWithOptions(allocator, rgb, options));
+    }
+}
+
 test "HT encoder refuses what one cleanup pass cannot code" {
     const allocator = std.testing.allocator;
     var samples = [_]u16{ 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12 };

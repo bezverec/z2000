@@ -486,6 +486,11 @@ than silently changing the codestream profile.
 - **--qstyle STYLE**: Quantization: **none**, **scalar-derived**, or
   **scalar-expounded**. Use none with 5-3 and a scalar style with 9-7, which
   defaults to **scalar-expounded**.
+- **--qstep STEP**: With 9-7, the base quantization step relative to the
+  sample range, as Kakadu's `Qstep`: each band's step is STEP divided by its
+  synthesis norm. The default is 1/2^depth (1/256 at 8 bits); larger steps
+  give smaller, lossier files. This is the quality setting of `--ht`, which
+  has no `--rates`.
 - **--guard-bits N**: Number of QCD guard bits.
 - **--layers N**: On encode, number of untargeted quality layers. On decode,
   reconstruct only the leading N layers; zero means all signalled layers.
@@ -535,8 +540,8 @@ Boolean marker and style options also accept a **--no-...** form.
   cleanup pass each; the output is a JPH file (brand `jph `) and needs a
   decoder that reads HTJ2K. With the reversible 5/3 transform the image is
   lossless; with `--transform 9-7` every quantized band is coded whole, so
-  the quantization alone sets the quality, and the image decodes as the
-  Part 1 stream of the same options does. Not with `--rates`.
+  the quantization (`--qstep`) alone sets the quality, and the image decodes
+  as the Part 1 stream of the same options does. Not with `--rates`.
 - **--bypass**: Enable selective arithmetic-coding bypass.
 - **--reset-context**: Reset MQ contexts at coding-pass boundaries.
 - **--terminate-all**: Terminate every coding pass.

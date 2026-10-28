@@ -5,6 +5,18 @@ entries are grouped by development milestone rather than semantic version.
 
 ## Unreleased
 
+### 9/7 Quality Setting (0.3.0 line)
+
+- `--qstep STEP` sets the 9/7 base step relative to the sample range, as
+  Kakadu's `Qstep` does: each band's step is STEP over its 9/7 synthesis
+  norm, written in the QCD (both styles). The default, 1/2^depth, keeps the
+  step sizes of before byte for byte. It is the quality setting of lossy
+  HT: on the 2048x2048 RGB image, `--ht --qstep` 0.004, 0.01, 0.02, and
+  0.05 give 8.07, 5.53, 3.35, and 0.67 MB at 52.2, 44.5, 38.2, and 27.6 dB,
+  within 0.3% of Kakadu's sizes at the same `Qstep` and as sharp. Steps the
+  QCD cannot signal, a step without the 9/7 transform, and a non-positive
+  one are refused.
+
 ### Lossy HT Encoding (0.3.0 line)
 
 - `--ht` now also takes the 9/7 transform: each quantized band is coded

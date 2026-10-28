@@ -564,6 +564,10 @@ fn rasterToJp2Command(
             index += 1;
             if (index >= args.len) return error.MissingValue;
             options.guard_bits = try std.fmt.parseInt(u8, args[index], 10);
+        } else if (std.mem.eql(u8, args[index], "--qstep")) {
+            index += 1;
+            if (index >= args.len) return error.MissingValue;
+            options.base_step = try std.fmt.parseFloat(f64, args[index]);
         } else if (std.mem.eql(u8, args[index], "--resolutions")) {
             index += 1;
             if (index >= args.len) return error.MissingValue;
@@ -2214,7 +2218,7 @@ fn usage() void {
         \\  z2000 decode <input.z2000> <output.pgm>
         \\  z2000 tiff-info <input.tif>
         \\  z2000 dng-info <input.dng>
-        \\  z2000 tiff-to-jp2 <input.tif> <output.jp2> [--page N] [--levels N|--resolutions N] [--tile W,H] [--tile-parts none|R|L|C|P] [--block N] [--progression RPCL|LRCP|RLCP|PCRL|CPRL] [--poc RECORDS] [--poc-location main|tile] [--mct rct|ict|none] [--transform 5-3|9-7] [--qstyle none|scalar-derived|scalar-expounded] [--guard-bits N] [--precincts LIST] [--layers N|--rates LIST] [--sop|--no-sop] [--eph|--no-eph] [--ppm|--no-ppm] [--ppt|--no-ppt] [--tlm|--no-tlm] [--t1-backend legacy-mq|iso-mq] [--ht|--no-ht] [--bypass|--no-bypass] [--reset-context] [--terminate-all] [--vertical-causal] [--predictable-termination] [--segmentation-symbols] [--threads N] [--debug-temp-sidecar] [--timings]
+        \\  z2000 tiff-to-jp2 <input.tif> <output.jp2> [--page N] [--levels N|--resolutions N] [--tile W,H] [--tile-parts none|R|L|C|P] [--block N] [--progression RPCL|LRCP|RLCP|PCRL|CPRL] [--poc RECORDS] [--poc-location main|tile] [--mct rct|ict|none] [--transform 5-3|9-7] [--qstyle none|scalar-derived|scalar-expounded] [--qstep STEP] [--guard-bits N] [--precincts LIST] [--layers N|--rates LIST] [--sop|--no-sop] [--eph|--no-eph] [--ppm|--no-ppm] [--ppt|--no-ppt] [--tlm|--no-tlm] [--t1-backend legacy-mq|iso-mq] [--ht|--no-ht] [--bypass|--no-bypass] [--reset-context] [--terminate-all] [--vertical-causal] [--predictable-termination] [--segmentation-symbols] [--threads N] [--debug-temp-sidecar] [--timings]
         \\  z2000 bmp-to-jp2 <input.bmp> <output.jp2> [tiff-to-jp2 options]
         \\  z2000 png-to-jp2 <input.png> <output.jp2> [tiff-to-jp2 options]
         \\  z2000 jpeg-to-jp2 <input.jpg> <output.jp2> [tiff-to-jp2 options]

@@ -358,7 +358,14 @@ here so they are not rediscovered as new.
   `Cmodes=HT` lossy streams: its 9/7 rounding, not the HT data. Kakadu's
   default lossy HT of the 2048x2048 RGB bench image is 8,131,819 bytes
   (one guard bit, Ccap15 0x0022, B = 10); z2000's is 8,128,094 bytes (two
-  guard bits, Ccap15 0x0023, B = 11).
+  guard bits, Ccap15 0x0023, B = 11). z2000's `--qstep` follows Kakadu's
+  `Qstep` (step over the band's synthesis norm, relative to 2^depth): on
+  that image at 0.004, 0.01, 0.02, and 0.05 Kakadu `Cmodes=HT` writes
+  8,075,476, 5,525,057, 3,341,392, and 672,055 bytes at 51.93, 44.47,
+  38.16, and 27.55 dB (decoded by Kakadu), z2000 8,070,831, 5,533,628,
+  3,350,091, and 673,715 bytes at 52.18, 44.53, 38.19, and 27.55 dB. The
+  lossy HT sweep (`--qstep` 0.001 to 0.2 among 125 inputs and option sets)
+  decodes in Kakadu and OpenJPEG as the Part 1 stream of the same steps.
 
 ## Methodological Cautions
 
