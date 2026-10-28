@@ -14876,6 +14876,86 @@ test "JPH files wrap HTJ2K codestreams with T.814 Annex D colour boxes" {
     }
 }
 
+/// The 64x48 gray texture of the Kakadu HT transcode fixtures.
+fn htGrayTextureForTest() [64 * 48]i64 {
+    var source: [64 * 48]i64 = undefined;
+    var state: u32 = 12345;
+    for (0..48) |y| {
+        for (0..64) |x| {
+            state = (state *% 1103515245 +% 12345) & 0x7fffffff;
+            const checker: i64 = if ((x / 8 + y / 8) % 2 != 0) 60 else 0;
+            const value = @as(i64, @intCast(x * 3 + y * 2)) + @as(i64, (state >> 16) % 41) - 20 + checker;
+            source[y * 64 + x] = std.math.clamp(value, 0, 255);
+        }
+    }
+    return source;
+}
+
+test "Kakadu mixed HT and Part 1 code-blocks decode each with its own coder" {
+    const allocator = std.testing.allocator;
+    // `kdu_compress Creversible=yes Clevels=2 Cblk={16,16} Clayers=3
+    // -rate 1,2,- Rshift=12 -roi {0.25,0.25},{0.5,0.5}` of the gray texture,
+    // then `kdu_transcode Smodes_required=HT|HTMIX SCP15_limb=11
+    // SCP15_caps=MIX|RGN`: SPcod 0xC0 mixes the coders in one
+    // tile-component (T.814 A.4), and the 32 blocks whose ROI-shifted
+    // magnitudes exceed the bound stay Part 1. Lossless, so every path gives
+    // the texture back; one layer matches Grok 20.4.19.
+    const stream = @embedFile("testdata/kakadu-ht-mixed-roi.j2c");
+    const one_layer = @embedFile("testdata/kakadu-ht-mixed-roi-l1-grok.raw");
+    const source = htGrayTextureForTest();
+    for ([_]u8{ 1, 4 }) |threads| {
+        var decoded = try codestream.decodeLosslessNativeWithOptions(allocator, stream, .{ .threads = threads }, .{});
+        defer decoded.deinit();
+        try std.testing.expectEqualSlices(i64, &source, decoded.planes[0].samples);
+    }
+    var first = try codestream.decodeLosslessNativeWithOptions(allocator, stream, .{ .quality_layer_limit = 1 }, .{});
+    defer first.deinit();
+    for (first.planes[0].samples, one_layer) |sample, reference| {
+        try std.testing.expectEqual(@as(i64, reference), sample);
+    }
+}
+
+test "mixed tile-component packet headers tell HT from Part 1 code-blocks" {
+    const allocator = std.testing.allocator;
+    const Case = struct {
+        /// Lblock increments before the length fields.
+        increments: u8,
+        passes: u16,
+        fields: []const struct { value: u64, bits: u6 },
+        part1: bool,
+        length: u64,
+    };
+    const cases = [_]Case{
+        // Lblock 3: a Part 1 block whatever the length (T.814 A.4).
+        .{ .increments = 0, .passes = 1, .fields = &.{.{ .value = 5, .bits = 3 }}, .part1 = true, .length = 5 },
+        // Lblock 4 with a leading 0 bit: the HT cleanup segment.
+        .{ .increments = 1, .passes = 1, .fields = &.{.{ .value = 5, .bits = 4 }}, .part1 = false, .length = 5 },
+        // A leading 1 bit: Part 1.
+        .{ .increments = 1, .passes = 1, .fields = &.{.{ .value = 13, .bits = 4 }}, .part1 = true, .length = 13 },
+        // Three passes: the HT reading takes three of the Part 1 field's
+        // four bits, and the fourth completes it.
+        .{ .increments = 0, .passes = 3, .fields = &.{ .{ .value = 3, .bits = 3 }, .{ .value = 0, .bits = 1 } }, .part1 = true, .length = 6 },
+        // A zero placeholder field then a non-zero low bit: Part 1.
+        .{ .increments = 0, .passes = 3, .fields = &.{ .{ .value = 0, .bits = 3 }, .{ .value = 1, .bits = 1 } }, .part1 = true, .length = 1 },
+    };
+    for (cases) |case| {
+        var bytes: std.ArrayList(u8) = .empty;
+        defer bytes.deinit(allocator);
+        var writer = t2.PacketHeaderWriter.init(allocator, &bytes);
+        for (0..case.increments) |_| try writer.writeBit(true);
+        try writer.writeBit(false);
+        for (case.fields) |field| try writer.writeBits(field.value, field.bits);
+        try writer.finish();
+        var reader = t2.PacketHeaderReader.init(bytes.items);
+        var state = t2.SegmentLengthState{ .high_throughput = true, .mixed = true };
+        var block = t2.DecodedPacketBlock{ .included = true, .first_inclusion = true, .zero_bitplanes = 0, .pass_count = case.passes, .byte_length = 0 };
+        try t2.readHighThroughputLengths(&reader, &state, 0, &block);
+        try std.testing.expectEqual(case.part1, block.part1_in_mixed);
+        try std.testing.expectEqual(case.length, block.byte_length);
+        try std.testing.expectEqual(!case.part1, state.high_throughput);
+    }
+}
+
 test "Kakadu HT transcodes of a layered stream decode placeholder and refinement passes" {
     const allocator = std.testing.allocator;
     // kdu_transcode Smodes_required=HT of two Kakadu 8.4.1 Part 1 streams
@@ -14892,19 +14972,8 @@ test "Kakadu HT transcodes of a layered stream decode placeholder and refinement
     // Kakadu 8.4.1 and Grok 20.4.19 give the same samples for all layers.
     const bounded_full = @embedFile("testdata/kakadu-ht-layers-causal-b8.raw");
     const bounded_two_layers = @embedFile("testdata/kakadu-ht-layers-causal-b8-l2-grok.raw");
-    const width = 64;
-    const height = 48;
 
-    var source: [width * height]i64 = undefined;
-    var state: u32 = 12345;
-    for (0..height) |y| {
-        for (0..width) |x| {
-            state = (state *% 1103515245 +% 12345) & 0x7fffffff;
-            const checker: i64 = if ((x / 8 + y / 8) % 2 != 0) 60 else 0;
-            const value = @as(i64, @intCast(x * 3 + y * 2)) + @as(i64, (state >> 16) % 41) - 20 + checker;
-            source[y * width + x] = std.math.clamp(value, 0, 255);
-        }
-    }
+    const source = htGrayTextureForTest();
 
     for ([_]u8{ 1, 4 }) |threads| {
         var decoded = try codestream.decodeLosslessNativeWithOptions(allocator, lossless, .{ .threads = threads }, .{});

@@ -67,18 +67,20 @@ Since 2026-10-28 (`main`, the 0.3.0 line) the manifest also holds the
 same checkout's 40 HTJ2K codestreams (`htj2k_bsets_profile0/1`, Kakadu
 `kdu_transcode` outputs of the T.803 streams at several magnitude bounds B)
 and three committed Kakadu HT fixtures; then the checkout's 20 JPH files
-(`testfiles_jph`) and a committed Kakadu JPH file, 210 entries in all:
-184 decode passes, 26 expected fail-closed cases, and no mismatch with the
-optional root; 108 passes, 19 fail-closed cases, and 83 skips without it. The 23
+(`testfiles_jph`) and committed Kakadu JPH and mixed-coder files, 211
+entries in all: 188 decode passes, 23 expected fail-closed cases, and no
+mismatch with the optional root; 109 passes, 19 fail-closed cases, and 83
+skips without it. The 25
 lossless transcodes reuse their originals' T.803 references, since z2000
-decodes each exactly as it decodes the original. The 14 B-limited ones,
+decodes each exactly as it decodes the original. The 15 B-limited ones,
 which drop coding passes, are pinned by native hashes, checked when they
 were added against Kakadu 8.4.1 and Grok 20.4.19: exact on the 5/3 streams,
 one LSB on the 9/7 ones, except `ds0_ht_06` component 0, where both
 references differ from z2000 by up to 570 exactly as they do on `p0_06`
 itself (an ROI reconstruction of truncated background; all three are far
-from the class-1 reference, z2000 least). The three MIXED `ds0_hm` streams
-are expected `UnsupportedPayload`. The 16 renderable JPH files are pinned
+from the class-1 reference, z2000 least). Of the three MIXED `ds0_hm`
+streams, `hm_06_b18` and `hm_15_b8` decode exactly as their originals and
+use their references, and the B-limited `hm_06_b11` is hash-pinned. The 16 renderable JPH files are pinned
 by native hashes of codestreams that decode exactly as Kakadu decodes
 them; `file2` (a colour-reordering channel definition) and `file10` (no
 colour box, five application-defined channels) are expected

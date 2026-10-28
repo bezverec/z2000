@@ -5335,6 +5335,25 @@
       "expected_native_sha256": "579cee90d11a570bb337186303dec4b682e6ad7e73c97db95f787e9920966e0e"
     },
     {
+      "id": "kakadu-ht-mixed-roi",
+      "path": "src/testdata/kakadu-ht-mixed-roi.j2c",
+      "availability": "committed",
+      "format": "j2k",
+      "decoder": "native",
+      "sha256": "b1cbc404ec5646209522b9f83188962ca7b1cd310fe3fa4d8c6f40b620ec8dfa",
+      "source": {
+        "producer": "Kakadu demo applications",
+        "version": "8.4.1",
+        "origin": "locally generated 64x48 gray texture; kdu_compress Creversible=yes Clevels=2 Cblk={16,16} Clayers=3 -rate 1,2,- Rshift=12 -roi {0.25,0.25},{0.5,0.5} then kdu_transcode Smodes_required=HT|HTMIX SCP15_limb=11 SCP15_caps=MIX|RGN",
+        "license": "project-generated synthetic test fixture under the repository license",
+        "redistribution": "committed codestream; Kakadu application not redistributed"
+      },
+      "oracle": "src/tests.zig verifies the exact source texture (lossless) and Grok 20.4.19's one-layer decode; 32 of the blocks are Part 1 ones in a mixed tile-component",
+      "features": ["ht-block-coder", "roi-rgn-maxshift", "reversible-53"],
+      "expectation": "decode_pass",
+      "expected_native_sha256": "6b22f7229c615076c355a91daf4ee80f141f75355aa09091c5596a9bb0a61aa2"
+    },
+    {
       "id": "kakadu-jph-rgb",
       "path": "src/testdata/kakadu-ht-rgb.jph",
       "availability": "committed",
@@ -5588,6 +5607,7 @@
       "availability": "optional",
       "root_env": "Z2000_PART4_ROOT",
       "format": "j2k",
+      "decoder": "native",
       "sha256": "2ed9119d74bab5e413dc3e8d0612189bbc66d2003784d0cffa18f303fcfb2e1b",
       "source": {
         "producer": "ITU-T T.814 | ISO/IEC 15444-15 HTJ2K conformance sets in the T.803 corpus",
@@ -5596,10 +5616,10 @@
         "license": "JPEG 2000 standard conformance/testing grant in COPYRIGHT.txt; notice retention required",
         "redistribution": "optional local asset; not redistributed by z2000"
       },
-      "oracle": "MIXED tile-components (SPcod bits 6 and 7) mix HT and Part 1 code-blocks, which needs per-block coder detection; unsupported, not malformed",
+      "oracle": "B-limited transcode (coding passes discarded): within 1 LSB of Kakadu 8.4.1 and Grok 20.4.19 on components 1-3; component 0 is z2000's p0_06 ROI reconstruction, as for the Part 1 stream",
       "features": ["ht-block-coder", "siz-bounded-unsigned-components", "siz-subsampled-components", "roi-rgn-maxshift"],
-      "expectation": "fail_closed",
-      "expected_error": "UnsupportedPayload"
+      "expectation": "decode_pass",
+      "expected_native_sha256": "ba95a3650010ad860090f5836bcf96fd004830bc4c66f4bb2d56d1f4395014b1"
     },
     {
       "id": "wg1-htj2k-ds0-hm-06-b18",
@@ -5615,10 +5635,20 @@
         "license": "JPEG 2000 standard conformance/testing grant in COPYRIGHT.txt; notice retention required",
         "redistribution": "optional local asset; not redistributed by z2000"
       },
-      "oracle": "MIXED tile-components (SPcod bits 6 and 7) mix HT and Part 1 code-blocks, which needs per-block coder detection; unsupported, not malformed",
+      "oracle": "lossless transcode: native samples identical to z2000's decode of p0_06, checked here against that stream's T.803 references",
       "features": ["ht-block-coder", "siz-bounded-unsigned-components", "siz-subsampled-components", "roi-rgn-maxshift"],
-      "expectation": "fail_closed",
-      "expected_error": "UnsupportedPayload"
+      "expectation": "decode_pass",
+      "references": [{
+        "path": "reference_class0_profile0/c0p0_06.pgx",
+        "sha256": "2a2c37396620bc14f37c578c74b2894ecfeb5e20bd30dc67fc0e8db4bbfb592b",
+        "format": "pgx",
+        "component": 0,
+        "resolution_reduction": 3,
+        "space": "codestream_components",
+        "sample_shift": 4,
+        "max_peak_error": 109,
+        "max_mse": 743
+      }]
     },
     {
       "id": "wg1-htj2k-ds0-ht-06-b11",
@@ -6036,10 +6066,30 @@
         "license": "JPEG 2000 standard conformance/testing grant in COPYRIGHT.txt; notice retention required",
         "redistribution": "optional local asset; not redistributed by z2000"
       },
-      "oracle": "MIXED tile-components (SPcod bits 6 and 7) mix HT and Part 1 code-blocks, which needs per-block coder detection; unsupported, not malformed",
+      "oracle": "lossless transcode: native samples identical to z2000's decode of p0_15, checked here against that stream's T.803 references",
       "features": ["ht-block-coder", "siz-native-signed-components", "cod-qcd-component-overrides", "progression-poc", "roi-rgn-maxshift"],
-      "expectation": "fail_closed",
-      "expected_error": "UnsupportedPayload"
+      "expectation": "decode_pass",
+      "references": [
+        {
+          "path": "reference_class0_profile0/c0p0_15r0.pgx",
+          "sha256": "12e00c98f9ad94527542d99c0763955614352ece12f22afa8e418c77fdcb9d35",
+          "format": "pgx",
+          "component": 0,
+          "resolution_reduction": 0,
+          "crop": { "x": 0, "y": 0 },
+          "max_peak_error": 0,
+          "max_mse": 0
+        },
+        {
+          "path": "reference_class0_profile0/c0p0_15r1.pgx",
+          "sha256": "b95be5fbc4272595678af5955805ea073decb7bbb4e60708eaf41853c5c1311a",
+          "format": "pgx",
+          "component": 0,
+          "resolution_reduction": 1,
+          "max_peak_error": 0,
+          "max_mse": 0
+        }
+      ]
     },
     {
       "id": "wg1-htj2k-ds0-ht-15-b11",

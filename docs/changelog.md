@@ -5,6 +5,30 @@ entries are grouped by development milestone rather than semantic version.
 
 ## Unreleased
 
+### Mixed HT And Part 1 Code-Blocks Decode (0.3.0 line)
+
+- A tile-component whose SPcod/SPcoc sets bits 6 and 7 (T.814 Table A.4)
+  may hold HT and Part 1 code-blocks side by side; each block's coder is
+  told from its first non-empty codeword segment: an HT block signals Lblock
+  above 3 and a leading zero length bit (A.4), anything else is a Part 1
+  block. Tier-2 makes that call inside the speculative read that already
+  separates placeholder passes from the cleanup pass, completing a Part 1
+  block's wider length field from the bits that follow; from then on the
+  block follows the Part 1 rules and decodes through the MQ decoder with the
+  tile-component's RESET, CAUSAL, ER-TERM, and SEGMARK flags (its BYPASS and
+  TERMALL bits are reserved, `UnsupportedPayload`). The JP2/JPH wrapper
+  audit accepts the same style bytes.
+- Evidence: the three MIXED WG1 streams decode. `ds0_hm_06_b18` and
+  `ds0_hm_15_b8` give exactly what their T.803 originals give (34 and 8
+  Part 1 blocks) and pass those references; `ds0_hm_06_b11` is B-limited
+  (its `stats.txt` compares only component 0) and matches Kakadu 8.4.1 and
+  Grok 20.4.19 as the HT streams of that set do. A committed Kakadu fixture
+  (`kdu_transcode Smodes_required=HT|HTMIX` of an ROI stream, 32 Part 1
+  blocks) decodes losslessly to its source texture, and its one-layer
+  decode matches Grok's; a unit test covers each classification rule. All
+  40 WG1 HT codestreams now decode; the corpus has 188 passes and 23
+  expected fail-closed cases with the optional root.
+
 ### Faster HT Block Decoding (0.3.0 line)
 
 - The HT cleanup pass now decodes straight into the component plane

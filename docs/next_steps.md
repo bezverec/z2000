@@ -1089,8 +1089,11 @@ Kakadu 8.4.1's 67.6 ms; at twenty threads z2000 takes 60.7 ms against 45.0.
 What remains in the block decoder is the per-sample MagSgn and per-quad VLC
 work; closing the gap needs the OpenJPH/Kakadu style (quad pairs through
 joint tables, vectorized MagSgn unpacking), and at many threads the stages
-around Tier-1. Next, in order: MIXED tile-components and MULTIHT, the HT
-encoder (lossless first), and more decoder speed alongside.
+around Tier-1. Done, 2026-10-28: MIXED tile-components, each block's coder
+told from its first non-empty codeword segment (T.814 A.4); all 40 WG1 HT
+streams decode. Next, in order: MULTIHT (more than one HT set per block, no
+WG1 stream has it; Kakadu can write them with `Cplex`), the HT encoder
+(lossless first), and more decoder speed alongside.
 
 The HT packet headers need one rule T.814 leaves implicit. Kakadu's
 transcodes of multi-layer Part 1 streams keep each packet's coding passes,

@@ -16,7 +16,7 @@ All 16 official T.803 profile-0 conformance streams and all 7 profile-1
 streams decode against their references ([Part 1 corpus](docs/part1_corpus.md)).
 Neither figure nor that result is a formal ISO conformance certification.
 On `main` (the 0.3.0 line, not yet released) raw HTJ2K (Part 15)
-codestreams and JPH files decode as well, including the 37 non-MIXED WG1 HT
+codestreams and JPH files decode as well, including all 40 WG1 HT
 conformance streams and 16 of the 20 WG1 JPH files; HT encoding comes
 later ([roadmap](docs/roadmap.md), section 6).
 

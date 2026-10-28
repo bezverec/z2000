@@ -160,6 +160,7 @@ Order, each step under the normal slice gates:
    (two HT sets generated, at most three passes kept per block).
 5. Later: MIXED and MULTIHT streams and lossless JP2 <-> JPH transcoding,
    which z2000 can do at the quantized-sample level with both block coders.
+   MIXED done, 2026-10-28 (all 40 WG1 HT streams decode).
 
 ## Path To A General-Purpose Part 1 Codec
 

@@ -220,6 +220,10 @@ pub const CodeBlockStyle = struct {
     /// SPcod/SPcoc bit 6 of an HTJ2K codestream: HT code-blocks (ITU-T
     /// T.814), which use only `vertical_causal` of the flags above.
     high_throughput: bool = false,
+    /// SPcod/SPcoc bits 6 and 7: each code-block of the tile-component is
+    /// an HT or a Part 1 one, known from its first non-empty codeword
+    /// segment (T.814 A.4); `high_throughput` then says which, once known.
+    mixed: bool = false,
 
     pub fn fromCodByte(byte: u8) ?CodeBlockStyle {
         if ((byte & ~@as(u8, 0x3f)) != 0) return null;
@@ -241,7 +245,8 @@ pub const CodeBlockStyle = struct {
         if (self.vertical_causal) byte |= 0x08;
         if (self.predictable_termination) byte |= 0x10;
         if (self.segmentation_symbols) byte |= 0x20;
-        if (self.high_throughput) byte |= 0x40;
+        if (self.high_throughput or self.mixed) byte |= 0x40;
+        if (self.mixed) byte |= 0x80;
         return byte;
     }
 

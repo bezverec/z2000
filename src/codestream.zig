@@ -4202,6 +4202,17 @@ const StrictRpclBlockAssembly = struct {
         // folded back into one length per terminated segment here -- which is
         // what T1 consumes. Every other style terminates on boundaries the
         // packet structure already respects.
+        if (decoded.part1_in_mixed) {
+            // A mixed tile-component's block turned out to be a Part 1 one
+            // (T.814 A.4): its earlier contributions, read as placeholder
+            // passes, were empty Part 1 passes, and its one continuous MQ
+            // segment needs no lengths.
+            self.code_block_style.high_throughput = false;
+            self.segment_lengths.clearRetainingCapacity();
+            self.open_segment = false;
+            self.ht_cleanup_pass = null;
+            return;
+        }
         if (self.code_block_style.high_throughput) {
             // HT segments (T.814 B.3) span the placeholder passes and the
             // cleanup pass, then the SigProp and MagRef passes of each HT
@@ -9719,9 +9730,11 @@ test "strict main-header profile signaling validates CAP PRF and Rsiz" {
         .{ .ccap15 = 0x0003, .style = 0x00, .expected = CodestreamError.InvalidCodestream },
         .{ .ccap15 = 0x8003, .style = 0x00, .expected = null },
         // HTDECLARED forbids, and MIXED allows, mixing coders in one
-        // tile-component, which is not decoded yet.
+        // tile-component, whose Part 1 blocks may not use BYPASS or TERMALL.
         .{ .ccap15 = 0x8003, .style = 0xc0, .expected = CodestreamError.InvalidCodestream },
-        .{ .ccap15 = 0xc003, .style = 0xc0, .expected = CodestreamError.UnsupportedPayload },
+        .{ .ccap15 = 0xc003, .style = 0xfa, .expected = null },
+        .{ .ccap15 = 0xc003, .style = 0xc1, .expected = CodestreamError.UnsupportedPayload },
+        .{ .ccap15 = 0xc003, .style = 0xc4, .expected = CodestreamError.UnsupportedPayload },
         // Reserved HT style bits and Ccap15 values.
         .{ .ccap15 = 0x0003, .style = 0x41, .expected = CodestreamError.UnsupportedPayload },
         .{ .ccap15 = 0x4003, .style = 0x40, .expected = CodestreamError.UnsupportedPayload },
@@ -12579,7 +12592,10 @@ fn buildStrictPacketAuditBandGroup(
     errdefer reader_state.deinit();
     reader_state.bypass = code_block_style.bypass;
     reader_state.terminate_all = code_block_style.terminate_all;
-    for (reader_state.states) |*state| state.length_state.high_throughput = code_block_style.high_throughput;
+    for (reader_state.states) |*state| {
+        state.length_state.high_throughput = code_block_style.high_throughput;
+        state.length_state.mixed = code_block_style.mixed;
+    }
     const decoded = try allocator.alloc(t2.DecodedPacketBlock, leaf_count);
     errdefer allocator.free(decoded);
 
@@ -25894,11 +25910,23 @@ fn parseCodeBlockStyleByte(
         {
             return CodestreamError.InvalidCodestream;
         }
-        if (ht_block) {
+        if (ht_block and (style & 0x80) != 0) {
             // Bits 6 and 7 both set mix HT and Part 1 code-blocks in one
-            // tile-component (Table A.4), which needs per-block coder
-            // detection.
-            if ((style & 0x80) != 0) return CodestreamError.UnsupportedPayload;
+            // tile-component (Table A.4). Part 1 blocks there use neither
+            // BYPASS nor TERMALL, whose bits are reserved; the others keep
+            // their Part 1 meaning, and vertically causal context applies to
+            // both coders.
+            if ((style & 0x05) != 0) return CodestreamError.UnsupportedPayload;
+            return .{
+                .reset_context = (style & 0x02) != 0,
+                .vertical_causal = (style & 0x08) != 0,
+                .predictable_termination = (style & 0x10) != 0,
+                .segmentation_symbols = (style & 0x20) != 0,
+                .high_throughput = true,
+                .mixed = true,
+            };
+        }
+        if (ht_block) {
             // Table A.3 defines only vertically causal context next to bit 6
             // and reserves the rest.
             if ((style & ~@as(u8, 0x48)) != 0) return CodestreamError.UnsupportedPayload;

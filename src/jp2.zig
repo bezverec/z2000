@@ -2429,8 +2429,10 @@ fn codeBlockSizeFromCodExponent(exponent: u8) !u16 {
 /// A.4 against Ccap15.
 fn validateCodeBlockStyleByte(code_block_style: u8, high_throughput: bool) !void {
     if (high_throughput and (code_block_style & 0x40) != 0) {
-        // Bit 7 too mixes the two block coders in one tile-component.
-        if ((code_block_style & ~@as(u8, 0x48)) != 0) return Jp2Error.UnsupportedProfile;
+        // Bit 7 too mixes the two block coders in one tile-component, whose
+        // Part 1 blocks use neither BYPASS nor TERMALL (T.814 Table A.4).
+        const reserved: u8 = if ((code_block_style & 0x80) != 0) 0x05 else ~@as(u8, 0x48);
+        if ((code_block_style & reserved) != 0) return Jp2Error.UnsupportedProfile;
         return;
     }
     if ((code_block_style & 0xc0) != 0) return Jp2Error.InvalidCodestream;

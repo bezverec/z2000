@@ -452,6 +452,9 @@ pub const SegmentLengthState = struct {
     /// HT only: the index of the block's first HT cleanup pass once a
     /// packet has carried it; the passes before it are placeholder passes.
     ht_cleanup_pass: ?u16 = null,
+    /// A mixed tile-component (T.814 A.4): until its first non-empty
+    /// codeword segment, the block may still be a Part 1 one.
+    mixed: bool = false,
 
     pub fn write(
         self: *SegmentLengthState,
@@ -682,6 +685,9 @@ pub const DecodedPacketBlock = struct {
     segment_lengths: [max_block_segments]u64 = @splat(0),
     /// HT only: the block's first HT cleanup pass, if it has been included.
     ht_cleanup_pass: ?u16 = null,
+    /// This contribution showed a mixed tile-component's block to be a Part
+    /// 1 one; `byte_length` is its one continuous segment.
+    part1_in_mixed: bool = false,
 };
 
 pub const LayerTruncation = struct {
@@ -1760,9 +1766,21 @@ pub fn readHighThroughputLengths(
     }
     if (length_state.ht_cleanup_pass == null) {
         const refinement_passes = (end_pass - 1) % 3;
+        const full_bits = try length_state.lengthBitCount(try passCountLengthBits(pass_count));
         if (refinement_passes < pass_count) {
             const cleanup_passes = pass_count - refinement_passes;
-            const length = try reader.readBits(try length_state.lengthBitCount(try passCountLengthBits(cleanup_passes)));
+            const cleanup_bits = try length_state.lengthBitCount(try passCountLengthBits(cleanup_passes));
+            const length = try reader.readBits(cleanup_bits);
+            // In a mixed tile-component an HT block marks its first
+            // non-empty codeword segment with Lblock above 3 and a leading
+            // zero bit (T.814 A.4); anything else is a Part 1 block, whose
+            // single length field these bits began.
+            if (length != 0 and length_state.mixed and
+                (length_state.lblock <= 3 or length < 2 or (length >> (cleanup_bits - 1)) != 0))
+            {
+                const rest = try reader.readBits(full_bits - cleanup_bits);
+                return part1InMixed(length_state, block, (length << (full_bits - cleanup_bits)) | rest);
+            }
             if (length != 0) {
                 // The first HT cleanup segment has at least two bytes, and
                 // every earlier codeword segment of it was empty.
@@ -1775,13 +1793,18 @@ pub fn readHighThroughputLengths(
                     block.segment_count = 2;
                 }
             } else {
-                const extra_bits = try passCountLengthBits(pass_count) - try passCountLengthBits(cleanup_passes);
-                if (try reader.readBits(extra_bits) != 0) return PacketHeaderError.InvalidPacketHeader;
+                const rest = try reader.readBits(full_bits - cleanup_bits);
+                if (rest != 0) {
+                    if (!length_state.mixed) return PacketHeaderError.InvalidPacketHeader;
+                    return part1InMixed(length_state, block, rest);
+                }
                 block.segment_count = 1;
             }
         } else {
-            if (try reader.readBits(try length_state.lengthBitCount(try passCountLengthBits(pass_count))) != 0) {
-                return PacketHeaderError.InvalidPacketHeader;
+            const length = try reader.readBits(full_bits);
+            if (length != 0) {
+                if (!length_state.mixed) return PacketHeaderError.InvalidPacketHeader;
+                return part1InMixed(length_state, block, length);
             }
             block.segment_count = 1;
         }
@@ -1804,6 +1827,17 @@ pub fn readHighThroughputLengths(
     }
     block.byte_length = total;
     block.ht_cleanup_pass = length_state.ht_cleanup_pass;
+}
+
+/// Settle a mixed tile-component's block as a Part 1 one whose current
+/// contribution has `length` bytes in one continuous segment; its later
+/// contributions follow the Part 1 rules.
+fn part1InMixed(length_state: *SegmentLengthState, block: *DecodedPacketBlock, length: u64) void {
+    length_state.high_throughput = false;
+    length_state.mixed = false;
+    block.part1_in_mixed = true;
+    block.segment_count = 0;
+    block.byte_length = length;
 }
 
 pub fn readPrecinctPacketHeader(
