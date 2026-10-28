@@ -79,6 +79,13 @@ was 47 ms of the 55 ms block payload, in the order kept:
 - the next quad row's samples prefetched, rows being a band stride apart
   (28.8 -> about 26 ms; prefetching the whole block up front was slower).
 
+Then, separately committed: the codeword, MagSgn-pair, and MagSgn-quad row
+loops in their own `noinline` functions with local copies of the VLC and
+MagSgn writer state, which the large `encode` loop had spilled to the
+stack (payload 29.6 -> 29.1 ms, medians of 15). Rejected: the f32 exponent
+field for E_n in the line analysis again (another 0.6 ms of payload, within
+the noise of the total).
+
 Of the 29 ms of block payload left at one thread, about 26 is the block
 coder: line analysis 7, quad-row analysis 2.5, codewords about 10, MagSgn
 about 7; the rest is the copy of each segment out of the coder's scratch.

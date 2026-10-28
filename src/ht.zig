@@ -424,99 +424,25 @@ pub fn Encoder(comptime Coefficient: type) type {
                     @memset(bottom_values, 0);
                 }
                 const widest = row.analyze(initial, top, bottom, above, quad_width);
-                switch (initial) {
-                    inline else => |first_row| {
-                        const table = if (first_row) &cxt_vlc_encode_0 else &cxt_vlc_encode_1;
-                        const left_contexts = &left_context_indices[@intFromBool(first_row)];
-                        var left_rho: u4 = 0;
-                        var qx: usize = 0;
-                        while (qx < quad_width) : (qx += 2) {
-                            const pair = qx + 1 < quad_width;
-                            // Past the block `QuadRow` reads zero exponents,
-                            // so a missing second quad is empty; it codes
-                            // nothing.
-                            const rhos = [2]u4{ @intCast(row.rho[qx]), @intCast(row.rho[qx + 1]) };
-                            non_zero_count += @popCount(rhos[0]) + @as(u32, @popCount(rhos[1]));
-                            const residuals = [2]u8{ row.residual[qx], row.residual[qx + 1] };
-                            // The pair's VLC bits, at most 38, go out at once.
-                            var vlc_bits = Bits{};
-                            inline for (0..2) |i| {
-                                if (i == 0 or pair) {
-                                    const left = if (i == 0) left_rho else rhos[0];
-                                    const index = row.index[qx + i] | left_contexts[left];
-                                    // encodeSigEMB, the inverse of
-                                    // decodeSigEMB (7.3.5): context 0 codes
-                                    // significance in MEL, and an
-                                    // insignificant quad there no codeword,
-                                    // which its table entry gives as zero
-                                    // bits. The tables code every other quad
-                                    // (tested).
-                                    if (index < 1 << 9) mel.encode(@intFromBool(rhos[i] != 0));
-                                    const code = table[index];
-                                    row.known[qx + i] = code.e_k;
-                                    vlc_bits.add(code.codeword, code.len);
-                                }
-                            }
-                            left_rho = if (pair) rhos[1] else rhos[0];
-                            if (first_row) {
-                                encodeInitialResiduals(&vlc_bits, &mel, residuals);
-                            } else if ((residuals[0] | residuals[1]) < 16) {
-                                const code = residual_pairs[(@as(usize, residuals[0]) << 4) | residuals[1]];
-                                vlc_bits.add(code.bits, code.len);
-                            } else {
-                                encodeResiduals(&vlc_bits, residuals);
-                            }
-                            vlc.put(vlc_bits.value, vlc_bits.count);
-                        }
-                    },
-                }
-                // The MagSgn bits, a quad's at once while they fit; an
-                // insignificant sample adds none, an empty quad nothing.
+                non_zero_count += switch (initial) {
+                    inline else => |first_row| codeCodewords(first_row, row, quad_width, &mel, &vlc),
+                };
+                // Then the MagSgn bits: a quad pair's fit one word when no
+                // U_q of the row exceeds 7.
                 if (widest <= 7) {
-                    // Every quad pair's bits fit one word.
                     packMagSgnPairs(Magnitude, row, top_values, bottom_values, self.words.items, quad_width);
-                    for (0..(quad_width + 1) / 2) |pair| mag_sgn.put(self.words.items[pair], row.mag_sgn_length[pair]);
+                    putMagSgnPairs(&mag_sgn, self.words.items[0 .. (quad_width + 1) / 2], row.mag_sgn_length);
                 } else {
-                    for (0..quad_width) |q| {
-                        const rho: u4 = @intCast(row.rho[q]);
-                        const known: u4 = @intCast(row.known[q]);
-                        const bound = row.bound[q];
-                        const total = @as(u16, bound) * @popCount(rho) - @popCount(known);
-                        if (total <= 56) {
-                            var mag_sgn_bits = Bits{};
-                            inline for (0..4) |j| {
-                                const n = magSgnLength(rho, known, bound, j);
-                                const value: u64 = (if ((j & 1) != 0) bottom_values else top_values)[2 * q + (j >> 1)];
-                                mag_sgn_bits.add(value & ((@as(u64, 1) << @intCast(n)) - 1), n);
-                            }
-                            mag_sgn.put(mag_sgn_bits.value, mag_sgn_bits.count);
-                        } else {
-                            // Wide magnitudes: sample by sample.
-                            inline for (0..4) |j| {
-                                const value: u64 = (if ((j & 1) != 0) bottom_values else top_values)[2 * q + (j >> 1)];
-                                mag_sgn.putWide(value, magSgnLength(rho, known, bound, j));
-                            }
-                        }
-                    }
+                    putMagSgnQuads(Magnitude, &mag_sgn, row, top_values, bottom_values, quad_width);
                 }
                 // The next quad row predicts from this one's bottom line.
                 std.mem.swap([]u8, &above, &bottom);
             }
             if (magnitudes == 0) return .{ .bytes = &.{}, .bitplanes = 0, .non_zero_count = 0 };
 
-            // The writers' state stays in registers through the rows: only
-            // inline functions take their addresses, and the ends below
-            // work on copies.
-            var mag_sgn_end = mag_sgn;
-            var mel_end = mel;
-            var vlc_end = vlc;
-            mag_sgn_end.finish();
-            vlc_end.settle();
-            terminateMelVlc(&mel_end, &vlc_end);
-            return self.assemble(mag_sgn_end, mel_end, vlc_end, magnitudes, non_zero_count);
-        }
-
-        fn assemble(self: *Self, mag_sgn: MagSgnWriter, mel: MelWriter, vlc: VlcWriter, magnitudes: Magnitude, non_zero_count: u32) Error!Cleanup {
+            mag_sgn.finish();
+            vlc.settle();
+            terminateMelVlc(&mel, &vlc);
             const suffix_length = mel.position + vlc.written;
             if (suffix_length > 4079) return Error.InvalidBlock;
             const length = mag_sgn.position + suffix_length;
@@ -658,6 +584,91 @@ const QuadRow = struct {
         return @reduce(.Max, widest);
     }
 };
+
+/// The CxtVLC codewords, MEL symbols, and U-VLC residuals of one quad row
+/// (7.3.5 to 7.3.7 run backward), recording each quad's EMB pattern e_k in
+/// `row.known`; returns the row's significant samples. The VLC writer's
+/// state is copied in and out so that it stays in registers through the
+/// row; MEL, coding only where c_q is 0, works in place.
+noinline fn codeCodewords(comptime initial: bool, row: QuadRow, quad_width: usize, mel: *MelWriter, vlc_state: *VlcWriter) u32 {
+    var vlc = vlc_state.*;
+    defer vlc_state.* = vlc;
+    const table = if (initial) &cxt_vlc_encode_0 else &cxt_vlc_encode_1;
+    const left_contexts = &left_context_indices[@intFromBool(initial)];
+    var non_zero_count: u32 = 0;
+    var left_rho: u4 = 0;
+    var qx: usize = 0;
+    while (qx < quad_width) : (qx += 2) {
+        const pair = qx + 1 < quad_width;
+        // Past the block `QuadRow` reads zero exponents, so a missing second
+        // quad is empty; it codes nothing.
+        const rhos = [2]u4{ @intCast(row.rho[qx]), @intCast(row.rho[qx + 1]) };
+        non_zero_count += @popCount(rhos[0]) + @as(u32, @popCount(rhos[1]));
+        const residuals = [2]u8{ row.residual[qx], row.residual[qx + 1] };
+        // The pair's VLC bits, at most 38, go out at once.
+        var vlc_bits = Bits{};
+        inline for (0..2) |i| {
+            if (i == 0 or pair) {
+                const left = if (i == 0) left_rho else rhos[0];
+                const index = row.index[qx + i] | left_contexts[left];
+                // encodeSigEMB, the inverse of decodeSigEMB (7.3.5): context
+                // 0 codes significance in MEL, and an insignificant quad
+                // there no codeword, which its table entry gives as zero
+                // bits. The tables code every other quad (tested).
+                if (index < 1 << 9) mel.encode(@intFromBool(rhos[i] != 0));
+                const code = table[index];
+                row.known[qx + i] = code.e_k;
+                vlc_bits.add(code.codeword, code.len);
+            }
+        }
+        left_rho = if (pair) rhos[1] else rhos[0];
+        if (initial) {
+            encodeInitialResiduals(&vlc_bits, mel, residuals);
+        } else if ((residuals[0] | residuals[1]) < 16) {
+            const code = residual_pairs[(@as(usize, residuals[0]) << 4) | residuals[1]];
+            vlc_bits.add(code.bits, code.len);
+        } else {
+            encodeResiduals(&vlc_bits, residuals);
+        }
+        vlc.put(vlc_bits.value, vlc_bits.count);
+    }
+    return non_zero_count;
+}
+
+/// The words of `packMagSgnPairs`, `lengths[p]` bits of `words[p]`.
+noinline fn putMagSgnPairs(state: *MagSgnWriter, words: []const u64, lengths: []const u8) void {
+    var mag_sgn = state.*;
+    defer state.* = mag_sgn;
+    for (words, lengths[0..words.len]) |word, length| mag_sgn.put(word, length);
+}
+
+/// The MagSgn bits of one quad row quad by quad: a quad's at once while
+/// they fit, an insignificant sample adding none, an empty quad nothing.
+noinline fn putMagSgnQuads(comptime Magnitude: type, state: *MagSgnWriter, row: QuadRow, top: []const Magnitude, bottom: []const Magnitude, quad_width: usize) void {
+    var mag_sgn = state.*;
+    defer state.* = mag_sgn;
+    for (0..quad_width) |q| {
+        const rho: u4 = @intCast(row.rho[q]);
+        const known: u4 = @intCast(row.known[q]);
+        const bound = row.bound[q];
+        const total = @as(u16, bound) * @popCount(rho) - @popCount(known);
+        if (total <= 56) {
+            var bits = Bits{};
+            inline for (0..4) |j| {
+                const n = magSgnLength(rho, known, bound, j);
+                const value: u64 = (if ((j & 1) != 0) bottom else top)[2 * q + (j >> 1)];
+                bits.add(value & ((@as(u64, 1) << @intCast(n)) - 1), n);
+            }
+            mag_sgn.put(bits.value, bits.count);
+        } else {
+            // Wide magnitudes: sample by sample.
+            inline for (0..4) |j| {
+                const value: u64 = (if ((j & 1) != 0) bottom else top)[2 * q + (j >> 1)];
+                mag_sgn.putWide(value, magSgnLength(rho, known, bound, j));
+            }
+        }
+    }
+}
 
 /// The part of c_q a quad's left neighbour gives, shifted into a
 /// `vlcEncodeIndex`, by the neighbour's rho_q: in the initial row and
