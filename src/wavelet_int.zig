@@ -910,30 +910,71 @@ pub fn inverse53FinestRows(
     }
 }
 
+/// One row: split into its even and odd samples in `scratch`, then the
+/// lifting steps on those contiguous halves, writing the high samples
+/// after the low ones in `data`. The same steps and extensions as lifting
+/// in place, so the same coefficients.
 fn forward53Line(data: []i32, scratch: []i32) void {
-    if (data.len < 2) return;
+    const n = data.len;
+    if (n < 2) return;
+    const low_count = (n + 1) / 2;
+    const high_count = n / 2;
+    splitEvenOdd(data, scratch);
+    const even = scratch[0..low_count];
+    const odd = scratch[low_count..n];
+    const high = data[low_count..n];
 
-    var i: usize = 1;
-    while (i + 1 + horizontal_pair_lanes <= data.len) : (i += horizontal_pair_lanes) {
-        forward53PredictHorizontalGroup(data, i);
+    // High k: odd k less half the even samples on either side, the last
+    // mirrored when the row has no even sample after it.
+    var k: usize = 0;
+    while (k + horizontal_lanes < low_count and k + horizontal_lanes <= high_count) : (k += horizontal_lanes) {
+        const left: HorizontalVector = even[k..][0..horizontal_lanes].*;
+        const right: HorizontalVector = even[k + 1 ..][0..horizontal_lanes].*;
+        const value: HorizontalVector = odd[k..][0..horizontal_lanes].*;
+        high[k..][0..horizontal_lanes].* = value - floorHalfHorizontal(left + right);
+    }
+    while (k < high_count) : (k += 1) {
+        const right = if (k + 1 < low_count) even[k + 1] else even[k];
+        high[k] = odd[k] - floorHalf(even[k] + right);
+    }
+
+    // Low k: even k plus a quarter of the high samples on either side,
+    // mirrored at both ends.
+    data[0] = even[0] + floorQuarterBiased(high[0] + high[0]);
+    k = 1;
+    while (k + horizontal_lanes <= low_count and k + horizontal_lanes <= high_count) : (k += horizontal_lanes) {
+        const left: HorizontalVector = high[k - 1 ..][0..horizontal_lanes].*;
+        const right: HorizontalVector = high[k..][0..horizontal_lanes].*;
+        const value: HorizontalVector = even[k..][0..horizontal_lanes].*;
+        data[k..][0..horizontal_lanes].* = value + floorQuarterBiasedHorizontal(left + right);
+    }
+    while (k < low_count) : (k += 1) {
+        const right = if (k < high_count) high[k] else high[k - 1];
+        data[k] = even[k] + floorQuarterBiased(high[k - 1] + right);
+    }
+}
+
+/// The even samples of `data`, then its odd ones, into `scratch`.
+fn splitEvenOdd(data: []const i32, scratch: []i32) void {
+    var out: usize = 0;
+    var i: usize = 0;
+    while (i + horizontal_pair_lanes <= data.len) : (i += horizontal_pair_lanes) {
+        storeHorizontal(scratch, out, evenHorizontalSamples(loadHorizontalPair(data, i)));
+        out += horizontal_lanes;
     }
     while (i < data.len) : (i += 2) {
-        const right = if (i + 1 < data.len) data[i + 1] else data[i - 1];
-        data[i] -= floorHalf(data[i - 1] + right);
+        scratch[out] = data[i];
+        out += 1;
     }
-
-    data[0] += floorQuarterBiased(data[1] + data[1]);
-    i = 2;
-    while (i + 1 + horizontal_pair_lanes <= data.len) : (i += horizontal_pair_lanes) {
-        forward53UpdateHorizontalGroup(data, i);
+    i = 1;
+    while (i + horizontal_pair_lanes <= data.len) : (i += horizontal_pair_lanes) {
+        storeHorizontal(scratch, out, evenHorizontalSamples(loadHorizontalPair(data, i)));
+        out += horizontal_lanes;
     }
     while (i < data.len) : (i += 2) {
-        const left = data[i - 1];
-        const right = if (i + 1 < data.len) data[i + 1] else data[i - 1];
-        data[i] += floorQuarterBiased(left + right);
+        scratch[out] = data[i];
+        out += 1;
     }
-
-    packEvenOdd(data, scratch);
 }
 
 fn forward53Columns(data: []i32, stride: usize, width: usize, height: usize, scratch: []i32) void {
@@ -951,48 +992,32 @@ fn forward53Columns(data: []i32, stride: usize, width: usize, height: usize, scr
     }
 }
 
+/// One `lanes`-wide column strip in a single pass down the rows: each high
+/// row k (odd row 2k + 1) is predicted from the even rows around it and
+/// kept in `scratch`, and the even row 2k is updated from the high rows on
+/// either side and stored as low row k, which no later step reads; the high
+/// rows then follow the low ones. Same lifting steps and extensions as the
+/// separate passes, so the same coefficients.
 fn forward53ColumnVector(comptime lanes: usize, data: []i32, stride: usize, col: usize, height: usize, scratch: []i32) void {
-    var row: usize = 1;
-    while (row < height) : (row += 2) {
-        const right = if (row + 1 < height)
-            loadVector(lanes, data, stride, row + 1, col)
-        else
-            loadVector(lanes, data, stride, row - 1, col);
-        const updated = loadVector(lanes, data, stride, row, col) -
-            floorHalfVector(loadVector(lanes, data, stride, row - 1, col) + right);
-        storeVector(data, stride, row, col, updated);
+    const low_count = (height + 1) / 2;
+    var previous_high: @Vector(lanes, i32) = undefined;
+    var k: usize = 0;
+    while (k < low_count) : (k += 1) {
+        const row = 2 * k;
+        const even = loadVector(lanes, data, stride, row, col);
+        const has_high = row + 1 < height;
+        var high = previous_high;
+        if (has_high) {
+            const below = if (row + 2 < height) loadVector(lanes, data, stride, row + 2, col) else even;
+            high = loadVector(lanes, data, stride, row + 1, col) - floorHalfVector(even + below);
+            storeScratchVector(scratch, k, high);
+        }
+        const above = if (k == 0) high else previous_high;
+        storeVector(data, stride, k, col, even + floorQuarterBiasedVector(above + high));
+        previous_high = high;
     }
-
-    row = 0;
-    while (row < height) : (row += 2) {
-        const left = if (row > 0)
-            loadVector(lanes, data, stride, row - 1, col)
-        else
-            loadVector(lanes, data, stride, 1, col);
-        const right = if (row + 1 < height)
-            loadVector(lanes, data, stride, row + 1, col)
-        else
-            loadVector(lanes, data, stride, row - 1, col);
-        const updated = loadVector(lanes, data, stride, row, col) + floorQuarterBiasedVector(left + right);
-        storeVector(data, stride, row, col, updated);
-    }
-
-    var out: usize = 0;
-    row = 0;
-    while (row < height) : (row += 2) {
-        storeScratchVector(scratch, out, loadVector(lanes, data, stride, row, col));
-        out += 1;
-    }
-
-    row = 1;
-    while (row < height) : (row += 2) {
-        storeScratchVector(scratch, out, loadVector(lanes, data, stride, row, col));
-        out += 1;
-    }
-
-    row = 0;
-    while (row < height) : (row += 1) {
-        storeVector(data, stride, row, col, loadScratchVector(lanes, scratch, row));
+    for (0..height / 2) |high_row| {
+        storeVector(data, stride, low_count + high_row, col, loadScratchVector(lanes, scratch, high_row));
     }
 }
 
@@ -1342,33 +1367,6 @@ fn loadScratchVector(comptime lanes: usize, scratch: []const i32, row: usize) @V
 fn storeScratchVector(scratch: []i32, row: usize, value: anytype) void {
     const lanes = @typeInfo(@TypeOf(value)).vector.len;
     scratch[row * lanes ..][0..lanes].* = value;
-}
-
-fn packEvenOdd(data: []i32, scratch: []i32) void {
-    if (data.len <= 2) return;
-
-    var out: usize = 0;
-    var i: usize = 0;
-    while (i + horizontal_pair_lanes <= data.len) : (i += horizontal_pair_lanes) {
-        storeHorizontal(scratch, out, evenHorizontalSamples(loadHorizontalPair(data, i)));
-        out += horizontal_lanes;
-    }
-    while (i < data.len) : (i += 2) {
-        scratch[out] = data[i];
-        out += 1;
-    }
-
-    i = 1;
-    while (i + horizontal_pair_lanes <= data.len) : (i += horizontal_pair_lanes) {
-        storeHorizontal(scratch, out, evenHorizontalSamples(loadHorizontalPair(data, i)));
-        out += horizontal_lanes;
-    }
-    while (i < data.len) : (i += 2) {
-        scratch[out] = data[i];
-        out += 1;
-    }
-
-    @memcpy(data, scratch[0..data.len]);
 }
 
 fn unpackEvenOdd(data: []i32, scratch: []i32) void {

@@ -5,6 +5,20 @@ entries are grouped by development milestone rather than semantic version.
 
 ## Unreleased
 
+### Faster Forward 5/3 And HT Quad Rows (0.3.0 line)
+
+- The forward 5/3 transform's vertical step lifts each column strip in one
+  pass instead of four, and the horizontal step lifts the split even and
+  odd halves of a row instead of interleaved samples, then packing and
+  copying them; single-threaded DWT of the 2048x2048 RGB image drops from
+  28 to 12 ms, which the Part 1 encoder shares (total 554 -> 535 ms).
+- The HT encoder computes each quad row's significance, exponent bounds,
+  residuals, implicit-bit patterns, and above-line context sixteen quads
+  at a time, unrolls the quad pair, and stores MagSgn bits four bytes at a
+  time when no 0xFF can occur: single-threaded HT encoding takes 90 ms in
+  all (131 before, 206 at the first HT encoder) and 28 ms at twenty
+  threads. Output is byte-identical (284 encodes compared).
+
 ### Faster HT Encoding (0.3.0 line)
 
 - The HT block encoder writes its three byte-streams into buffers sized for

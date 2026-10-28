@@ -46,6 +46,45 @@ On Windows, the equivalent harness can include the irreversible profile:
   -OutDir .\zig-out\bench-compare -Runs 8 -Warmup 2 -Threads 16 -IncludeLossy
 ```
 
+## 2026-10-28: Intel Core i5-14500, HT quad rows and one-pass forward 5/3
+
+Base `93e2cfe`, `bench-rgb-2048.tif`, ReleaseFast, interleaved rounds
+(13 to 21), medians of `--timings`:
+
+| Encode | Threads | Block payload | Total |
+| --- | --- | --- | --- |
+| lossless `--ht` | 1 | 80.6 -> 55.2 ms | 131 -> 90.3 ms |
+| lossless `--ht` | 20 | 11.3 -> 10.1 ms | 29.4 -> 28.3 ms |
+| lossless Part 1 | 1 | 506 -> 504 ms | 554 -> 535 ms |
+| lossless Part 1 | 20 | 52.1 -> 52.2 ms | 68.2 -> 66.9 ms |
+
+Codestreams byte-identical to `050fd8c` on 284 encodes (eight TIFF inputs
+with twelve option sets each, Part 1 and HT, odd tiles down to 1x7 and
+7x1, and the 23 T.803 ZRAW layouts with and without tiles and layers).
+Kept, in order:
+
+- the quad pair unrolled at compile time and a quad's MagSgn bits added
+  without per-sample checks when they fit (80.6 -> 69.8 ms of block
+  payload);
+- the four-byte MagSgn store, now that a store carries up to 56 bits
+  (69.1 -> 65.1 ms; it lost when stores were per sample);
+- the forward 5/3 vertical step in one pass down each column strip
+  (high rows predicted into scratch, low rows updated and stored in place)
+  instead of four, and the horizontal step lifting the split even and odd
+  halves instead of interleaved samples followed by a pack and a copy:
+  DWT 28.3 -> 12.0 ms single-threaded, shared with Part 1;
+- `QuadRow`: rho, U, u, the implicit-bit pattern, and the above-line part
+  of the context for sixteen quads at a time in byte vectors, leaving only
+  the left-neighbour part of the context and the bit packing serial
+  (64.5 -> 53.9 ms).
+
+Rejected: the f32 exponent field in place of the vector leading-zero count
+(54.8 -> 55.6 ms). An RGB load by shuffles instead of per-lane gathers
+measured within noise and was kept. Of the 90 ms left, the per-pair loop
+and the writers are about 40 ms, the line analysis 8, the DWT 12, the RCT
+and TIFF widening about 12 (mostly first touches of fresh planes), and
+`memcpy` of payloads about 7.
+
 ## 2026-10-28: Intel Core i5-14500, HT block encoder speed
 
 Base `050fd8c`, `bench-rgb-2048.tif` lossless with `--ht`, ReleaseFast,

@@ -1015,16 +1015,19 @@ const RgbVector = struct {
 };
 
 fn loadRgbVector(samples: []const u16, pixel_index: usize) RgbVector {
-    var r: RctVector = @splat(0);
-    var g: RctVector = @splat(0);
-    var b: RctVector = @splat(0);
-    inline for (0..rct_lanes) |lane| {
-        const base = (pixel_index + lane) * 3;
-        r[lane] = @intCast(samples[base]);
-        g[lane] = @intCast(samples[base + 1]);
-        b[lane] = @intCast(samples[base + 2]);
-    }
-    return .{ .r = r, .g = g, .b = b };
+    // One load of the interleaved run, split by shuffles.
+    const run: @Vector(3 * rct_lanes, u16) = samples[pixel_index * 3 ..][0 .. 3 * rct_lanes].*;
+    return .{
+        .r = @intCast(@shuffle(u16, run, undefined, channelMask(0))),
+        .g = @intCast(@shuffle(u16, run, undefined, channelMask(1))),
+        .b = @intCast(@shuffle(u16, run, undefined, channelMask(2))),
+    };
+}
+
+fn channelMask(comptime channel: usize) @Vector(rct_lanes, i32) {
+    var mask: [rct_lanes]i32 = undefined;
+    for (&mask, 0..) |*index, lane| index.* = @intCast(3 * lane + channel);
+    return mask;
 }
 
 fn storeRgbVector(samples: anytype, pixel_index: usize, r: RctVector, g: RctVector, b: RctVector) void {
