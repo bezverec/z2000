@@ -604,6 +604,10 @@ fn rasterToJp2Command(
             options.terminate_all = true;
         } else if (std.mem.eql(u8, args[index], "--no-terminate-all")) {
             options.terminate_all = false;
+        } else if (std.mem.eql(u8, args[index], "--ht")) {
+            options.high_throughput = true;
+        } else if (std.mem.eql(u8, args[index], "--no-ht")) {
+            options.high_throughput = false;
         } else if (std.mem.eql(u8, args[index], "--vertical-causal")) {
             options.vertical_causal = true;
         } else if (std.mem.eql(u8, args[index], "--no-vertical-causal")) {
@@ -1285,6 +1289,8 @@ fn zrawToJ2kCommand(io: std.Io, allocator: std.mem.Allocator, args: []const []co
             options.reset_context = true;
         } else if (std.mem.eql(u8, arg, "--terminate-all")) {
             options.terminate_all = true;
+        } else if (std.mem.eql(u8, arg, "--ht")) {
+            options.high_throughput = true;
         } else if (std.mem.eql(u8, arg, "--vertical-causal")) {
             options.vertical_causal = true;
         } else if (std.mem.eql(u8, arg, "--segmentation-symbols")) {
@@ -2195,7 +2201,7 @@ fn usage() void {
         \\  z2000 decode <input.z2000> <output.pgm>
         \\  z2000 tiff-info <input.tif>
         \\  z2000 dng-info <input.dng>
-        \\  z2000 tiff-to-jp2 <input.tif> <output.jp2> [--page N] [--levels N|--resolutions N] [--tile W,H] [--tile-parts none|R|L|C|P] [--block N] [--progression RPCL|LRCP|RLCP|PCRL|CPRL] [--poc RECORDS] [--poc-location main|tile] [--mct rct|ict|none] [--transform 5-3|9-7] [--qstyle none|scalar-derived|scalar-expounded] [--guard-bits N] [--precincts LIST] [--layers N|--rates LIST] [--sop|--no-sop] [--eph|--no-eph] [--ppm|--no-ppm] [--ppt|--no-ppt] [--tlm|--no-tlm] [--t1-backend legacy-mq|iso-mq] [--bypass|--no-bypass] [--reset-context] [--terminate-all] [--vertical-causal] [--predictable-termination] [--segmentation-symbols] [--threads N] [--debug-temp-sidecar] [--timings]
+        \\  z2000 tiff-to-jp2 <input.tif> <output.jp2> [--page N] [--levels N|--resolutions N] [--tile W,H] [--tile-parts none|R|L|C|P] [--block N] [--progression RPCL|LRCP|RLCP|PCRL|CPRL] [--poc RECORDS] [--poc-location main|tile] [--mct rct|ict|none] [--transform 5-3|9-7] [--qstyle none|scalar-derived|scalar-expounded] [--guard-bits N] [--precincts LIST] [--layers N|--rates LIST] [--sop|--no-sop] [--eph|--no-eph] [--ppm|--no-ppm] [--ppt|--no-ppt] [--tlm|--no-tlm] [--t1-backend legacy-mq|iso-mq] [--ht|--no-ht] [--bypass|--no-bypass] [--reset-context] [--terminate-all] [--vertical-causal] [--predictable-termination] [--segmentation-symbols] [--threads N] [--debug-temp-sidecar] [--timings]
         \\  z2000 bmp-to-jp2 <input.bmp> <output.jp2> [tiff-to-jp2 options]
         \\  z2000 png-to-jp2 <input.png> <output.jp2> [tiff-to-jp2 options]
         \\  z2000 jpeg-to-jp2 <input.jpg> <output.jp2> [tiff-to-jp2 options]
@@ -2206,7 +2212,7 @@ fn usage() void {
         \\  z2000 decode-temp-jp2 <input.jp2> <output.tif> [--tile-index N|--region X,Y,W,H] [--layers N] [--threads N] [--t1-backend legacy-mq|iso-mq] [--convert-to-srgb] [--timings]
         \\  z2000 j2k-to-pgx <input.j2k|input.j2c> <output.pgx> [--component N] [--tile-index N|--region X,Y,W,H] [--layers N] [--reduce N] [--threads N] [--t1-backend legacy-mq|iso-mq] [--pgx-order ML|LM]
         \\  z2000 j2k-to-zraw <input.j2k|input.j2c> <output.zraw> [--tile-index N|--region X,Y,W,H] [--layers N] [--reduce N] [--threads N] [--t1-backend legacy-mq|iso-mq]
-        \\  z2000 zraw-to-j2k <input.zraw> <output.j2k> [--tile W,H] [--mct none|rct] [--component C:levels=N/block=WxH/precincts=[w,h]../STYLE...] [--roi [C:]X,Y,W,H] [--rates R1,R2,...] [--progression ORDER] [--tile-parts R|L|C|P|none] [--poc RECORDS] [--poc-location main|tile] [--levels N] [--layers N] [--block N] [--sop|--no-sop] [--eph|--no-eph] [--tlm|--no-tlm] [--ppm] [--ppt] [--threads N] [--bypass] [--reset-context] [--terminate-all] [--vertical-causal] [--predictable-termination] [--segmentation-symbols]
+        \\  z2000 zraw-to-j2k <input.zraw> <output.j2k> [--tile W,H] [--mct none|rct] [--component C:levels=N/block=WxH/precincts=[w,h]../STYLE...] [--roi [C:]X,Y,W,H] [--rates R1,R2,...] [--progression ORDER] [--tile-parts R|L|C|P|none] [--poc RECORDS] [--poc-location main|tile] [--levels N] [--layers N] [--block N] [--sop|--no-sop] [--eph|--no-eph] [--tlm|--no-tlm] [--ppm] [--ppt] [--threads N] [--ht] [--bypass] [--reset-context] [--terminate-all] [--vertical-causal] [--predictable-termination] [--segmentation-symbols]
         \\
         \\Notes:
         \\  PGM input must be binary P5 with max value 255.

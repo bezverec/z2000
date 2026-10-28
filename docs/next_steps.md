@@ -1091,9 +1091,16 @@ work; closing the gap needs the OpenJPH/Kakadu style (quad pairs through
 joint tables, vectorized MagSgn unpacking), and at many threads the stages
 around Tier-1. Done, 2026-10-28: MIXED tile-components, each block's coder
 told from its first non-empty codeword segment (T.814 A.4); all 40 WG1 HT
-streams decode. Next, in order: MULTIHT (more than one HT set per block, no
-WG1 stream has it; Kakadu can write them with `Cplex`), the HT encoder
-(lossless first), and more decoder speed alongside.
+streams decode. MULTIHT (more than one HT set per block) waits for the
+encoder: no WG1 stream has it, and Kakadu 8.4.1 with `Cplex` and
+`SCP15_caps=SETS` only sets the Ccap15 bit. Done, 2026-10-28: lossless HT
+encoding (`--ht`), one cleanup pass per block through every raster and
+wide writer, decoded exactly by Kakadu, Grok, and OpenJPEG, at Kakadu's
+file size; one thread takes about 210 ms on the 2048x2048 RGB image
+against Kakadu's 150 ms. Next, in order: quantization-driven lossy HT
+(9/7), rate targets through complexity control (HT SigProp and MagRef
+passes, then MULTIHT streams of z2000's own making), and encoder and
+decoder speed alongside.
 
 The HT packet headers need one rule T.814 leaves implicit. Kakadu's
 transcodes of multi-layer Part 1 streams keep each packet's coding passes,

@@ -157,7 +157,10 @@ Order, each step under the normal slice gates:
    closed, as for JP2.
 4. HT block encoder: lossless first (one Cleanup pass at bit-plane 0), then
    quantization-driven lossy, then `--rates` through complexity control
-   (two HT sets generated, at most three passes kept per block).
+   (two HT sets generated, at most three passes kept per block). Lossless
+   done, 2026-10-28: `--ht` on every raster and wide writer; Kakadu 8.4.1,
+   Grok 20.4.19, and OpenJPEG 2.5.4 decode the output exactly, at Kakadu's
+   file size.
 5. Later: MIXED and MULTIHT streams and lossless JP2 <-> JPH transcoding,
    which z2000 can do at the quantized-sample level with both block coders.
    MIXED done, 2026-10-28 (all 40 WG1 HT streams decode).

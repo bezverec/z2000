@@ -14956,6 +14956,154 @@ test "mixed tile-component packet headers tell HT from Part 1 code-blocks" {
     }
 }
 
+/// The CAP marker segment of an HTJ2K codestream, which z2000 writes right
+/// after SIZ: Rsiz bit 14, Pcap bit 17, and the Ccap15 word returned.
+fn expectHighThroughputHeaderForTest(stream: []const u8) !u16 {
+    try std.testing.expectEqual(@as(u16, 0x4000), std.mem.readInt(u16, stream[6..8], .big));
+    const cap = 4 + @as(usize, std.mem.readInt(u16, stream[4..6], .big));
+    try std.testing.expectEqual(@as(u16, 0xff50), std.mem.readInt(u16, stream[cap..][0..2], .big));
+    try std.testing.expectEqual(@as(u16, 8), std.mem.readInt(u16, stream[cap + 2 ..][0..2], .big));
+    try std.testing.expectEqual(@as(u32, 0x00020000), std.mem.readInt(u32, stream[cap + 4 ..][0..4], .big));
+    // COD follows, its style byte with bit 6 set.
+    const cod = cap + 10;
+    try std.testing.expectEqual(@as(u16, 0xff52), std.mem.readInt(u16, stream[cod..][0..2], .big));
+    try std.testing.expectEqual(@as(u8, 0x40), stream[cod + 12] & 0xc0);
+    return std.mem.readInt(u16, stream[cap + 8 ..][0..2], .big);
+}
+
+test "HT encoder writes lossless HTJ2K codestreams and JPH files" {
+    const allocator = std.testing.allocator;
+    const texture = htGrayTextureForTest();
+    var gray_samples: [64 * 48]u16 = undefined;
+    for (&gray_samples, texture) |*out, sample| out.* = @intCast(sample);
+    const gray = image.GrayImage{ .allocator = allocator, .width = 64, .height = 48, .bit_depth = 8, .samples = &gray_samples };
+    const variants = [_]codestream.LosslessOptions{
+        .{ .high_throughput = true, .mct = .none, .levels = 3 },
+        .{ .high_throughput = true, .mct = .none, .levels = 2, .tile_width = 23, .tile_height = 17, .block_width = 16, .block_height = 8, .layers = 3, .progression = .lrcp, .tile_part_divisions = null },
+        .{ .high_throughput = true, .mct = .none, .levels = 0, .vertical_causal = true, .eph = true, .ppm = true },
+    };
+    for (variants) |options| {
+        const stream = try codestream.encodeLosslessGrayWithOptions(allocator, gray, options);
+        defer allocator.free(stream);
+        // 8-bit bands: M_b reaches 11 in HH, MAGB set 3 (B = 11), HTONLY,
+        // reversible.
+        try std.testing.expectEqual(@as(u16, 3), try expectHighThroughputHeaderForTest(stream));
+        var decoded = try codestream.decodeLosslessNativeWithOptions(allocator, stream, .{}, .{});
+        defer decoded.deinit();
+        try std.testing.expectEqualSlices(i64, &texture, decoded.planes[0].samples);
+    }
+
+    // RGB through the RCT on a tile grid; the JP2 writer brands it JPH.
+    var rgb_samples: [64 * 48 * 3]u16 = undefined;
+    for (texture, 0..) |sample, index| {
+        const value: u16 = @intCast(sample);
+        rgb_samples[3 * index] = value;
+        rgb_samples[3 * index + 1] = 255 - value;
+        rgb_samples[3 * index + 2] = (value * 7) % 256;
+    }
+    const rgb = image.RgbImage{ .allocator = allocator, .width = 64, .height = 48, .bit_depth = 8, .samples = &rgb_samples };
+    const rgb_stream = try codestream.encodeLosslessWithOptions(allocator, rgb, .{ .high_throughput = true, .levels = 3, .tile_width = 40, .tile_height = 40 });
+    defer allocator.free(rgb_stream);
+    // The RCT's chroma bit: B = 12, set 4, as Kakadu writes for 8-bit RGB.
+    try std.testing.expectEqual(@as(u16, 4), try expectHighThroughputHeaderForTest(rgb_stream));
+    var rgb_decoded = try codestream.decodeLosslessNativeWithOptions(allocator, rgb_stream, .{}, .{});
+    defer rgb_decoded.deinit();
+    for (0..3) |component| {
+        for (rgb_decoded.planes[component].samples, 0..) |sample, index| {
+            try std.testing.expectEqual(@as(i64, rgb_samples[3 * index + component]), sample);
+        }
+    }
+    const wrapped = try jp2.wrapRgbCodestream(allocator, rgb, rgb_stream);
+    defer allocator.free(wrapped);
+    // Signature box, then ftyp: brand and the one compatibility entry.
+    try std.testing.expectEqualSlices(u8, "jph ", wrapped[20..24]);
+    try std.testing.expectEqualSlices(u8, "jph ", wrapped[28..32]);
+    const info = try jp2.parseInfo(allocator, wrapped);
+    try std.testing.expect(info.high_throughput);
+    // A Part 1 codestream keeps the JP2 brand.
+    const part1 = try codestream.encodeLosslessWithOptions(allocator, rgb, .{ .levels = 3 });
+    defer allocator.free(part1);
+    const part1_wrapped = try jp2.wrapRgbCodestream(allocator, rgb, part1);
+    defer allocator.free(part1_wrapped);
+    try std.testing.expectEqualSlices(u8, "jp2 ", part1_wrapped[20..24]);
+}
+
+test "HT encoder codes wide components through the native encoder" {
+    const allocator = std.testing.allocator;
+    var prng = std.Random.DefaultPrng.init(0x4854_4e41);
+    const random = prng.random();
+    const Case = struct { precision: u8, signed: bool, options: codestream.LosslessOptions };
+    const cases = [_]Case{
+        .{ .precision = 20, .signed = true, .options = .{ .high_throughput = true, .mct = .none, .levels = 3 } },
+        .{ .precision = 35, .signed = false, .options = .{ .high_throughput = true, .mct = .none, .levels = 2, .tile_width = 19, .tile_height = 13 } },
+        .{ .precision = 31, .signed = false, .options = .{ .high_throughput = true, .mct = .rct, .levels = 2 } },
+        // A COC for one component sends it through the componentwise writer.
+        .{ .precision = 12, .signed = true, .options = .{ .high_throughput = true, .mct = .none, .levels = 3, .component_coding = &.{.{ .component = 2, .levels = 1, .block_width = 8, .block_height = 32 }} } },
+    };
+    for (cases) |case| {
+        const width = 37;
+        const height = 29;
+        var components: [3]native_samples.ComponentLayout = undefined;
+        for (&components) |*layout| layout.* = .{
+            .precision = case.precision,
+            .signed = case.signed,
+            .x0 = 0,
+            .y0 = 0,
+            .x_step = 1,
+            .y_step = 1,
+            .width = width,
+            .height = height,
+        };
+        var source = try native_samples.SamplePlanes.initFromLayout(allocator, .{
+            .allocator = allocator,
+            .capabilities = 0,
+            .reference_x0 = 0,
+            .reference_y0 = 0,
+            .reference_x1 = width,
+            .reference_y1 = height,
+            .tile_width = width,
+            .tile_height = height,
+            .tile_origin_x = 0,
+            .tile_origin_y = 0,
+            .components = &components,
+        }, .{});
+        defer source.deinit();
+        const minimum: i64 = if (case.signed) -(@as(i64, 1) << @intCast(case.precision - 1)) else 0;
+        const maximum: i64 = if (case.signed) (@as(i64, 1) << @intCast(case.precision - 1)) - 1 else (@as(i64, 1) << @intCast(case.precision)) - 1;
+        for (source.planes) |plane| {
+            for (plane.samples) |*sample| sample.* = random.intRangeAtMost(i64, minimum, maximum);
+            plane.samples[0] = minimum;
+            plane.samples[1] = maximum;
+        }
+        const stream = try codestream.encodeNativeLosslessWithOptions(allocator, source, case.options);
+        defer allocator.free(stream);
+        _ = try expectHighThroughputHeaderForTest(stream);
+        var decoded = try codestream.decodeLosslessNative(allocator, stream, .{});
+        defer decoded.deinit();
+        for (source.planes, decoded.planes) |expected, actual| {
+            try std.testing.expectEqualSlices(i64, expected.samples, actual.samples);
+        }
+    }
+}
+
+test "HT encoder refuses what one lossless cleanup pass cannot code" {
+    const allocator = std.testing.allocator;
+    var samples = [_]u16{ 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12 };
+    const rgb = image.RgbImage{ .allocator = allocator, .width = 2, .height = 2, .bit_depth = 8, .samples = &samples };
+    var rated = codestream.LosslessOptions{ .high_throughput = true, .layers = 2, .rate_count = 1 };
+    rated.rates[0] = 4;
+    const refused = [_]codestream.LosslessOptions{
+        rated,
+        .{ .high_throughput = true, .transform = .irreversible_9_7, .quantization = .scalar_expounded, .mct = .ict },
+        .{ .high_throughput = true, .bypass = true },
+        .{ .high_throughput = true, .terminate_all = true },
+        .{ .high_throughput = true, .segmentation_symbols = true },
+    };
+    for (refused) |options| {
+        try std.testing.expectError(codestream.CodestreamError.UnsupportedPayload, codestream.encodeLosslessWithOptions(allocator, rgb, options));
+    }
+}
+
 test "Kakadu HT transcodes of a layered stream decode placeholder and refinement passes" {
     const allocator = std.testing.allocator;
     // kdu_transcode Smodes_required=HT of two Kakadu 8.4.1 Part 1 streams

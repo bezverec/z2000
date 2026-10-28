@@ -367,6 +367,12 @@ pub const LosslessOptions = struct {
     threads: u8 = 1,
     emit_temporary_payload_sidecar: bool = false,
     t1_backend: T1Backend = .iso_mq,
+    /// HT code-blocks of ITU-T T.814 (HTJ2K) in place of Part 1 ones, one
+    /// cleanup pass each, which codes every block losslessly; the main
+    /// header gains Rsiz bit 14 and a Part 15 CAP marker segment. Reversible
+    /// 5/3 only, without rate targets, regions of interest, or Part 1 mode
+    /// flags other than the vertically causal context.
+    high_throughput: bool = false,
     /// Per-component coding written as main-header COC markers. Only the
     /// wide native encoder (`encodeNativeLosslessWithOptions`) carries it;
     /// every other encoder refuses a non-empty list.
@@ -760,6 +766,7 @@ pub fn encodeLosslessPlanarWithOptions(
     try validateRates(options);
     try validateTilePartDivisions(options.tile_part_divisions);
     try validateCodingPath(options);
+    try validateHighThroughputRequest(options);
 
     const grid = tile_grid.Grid.fromImageSize(
         planar.width,
@@ -810,6 +817,7 @@ pub fn encodeLosslessPlanarWithOptions(
         .vertical_causal = encode_options.vertical_causal,
         .predictable_termination = encode_options.predictable_termination,
         .segmentation_symbols = encode_options.segmentation_symbols,
+        .high_throughput = encode_options.high_throughput,
     };
     const scaffold_options = tile_pipeline.PacketScaffoldOptions{
         .layers = encode_options.layers,
@@ -877,6 +885,7 @@ pub fn encodeNativeLosslessWithOptions(
     source: NativeSamplePlanes,
     options: LosslessOptions,
 ) ![]u8 {
+    try validateHighThroughputRequest(options);
     if (!nativeLayoutIsUniform(source) or options.component_coding.len != 0 or options.roi_regions.len != 0) {
         return encodeNativeWideComponentwise(allocator, source, options);
     }
@@ -1640,7 +1649,7 @@ fn wideComponentwiseMainHeaderBytes(
     if (lsiz > std.math.maxInt(u16)) return CodestreamError.UnsupportedPayload;
     try appendMarker(allocator, &out, .siz);
     try appendU16Be(allocator, &out, @intCast(lsiz));
-    try appendU16Be(allocator, &out, 0);
+    try appendU16Be(allocator, &out, if (encode_options.high_throughput) profile_signaling.rsiz_cap_present else 0);
     try appendU32Be(allocator, &out, source.reference_x1);
     try appendU32Be(allocator, &out, source.reference_y1);
     try appendU32Be(allocator, &out, source.reference_x0);
@@ -1658,6 +1667,11 @@ fn wideComponentwiseMainHeaderBytes(
         try out.append(allocator, layout.y_step);
     }
 
+    if (encode_options.high_throughput) {
+        var magnitude_bits: u8 = 0;
+        for (quantizations) |quantization| magnitude_bits = @max(magnitude_bits, std.mem.max(u8, &quantization.bitplanes));
+        try appendHighThroughputCap(allocator, &out, magnitude_bits);
+    }
     const two_byte_selector = component_count > 256;
     try appendCod(allocator, &out, levels, encode_options);
     for (component_options, 0..) |coding, component| {
@@ -1751,6 +1765,7 @@ fn wideBlockStyle(encode_options: LosslessOptions) ebcot.CodeBlockStyle {
         .vertical_causal = encode_options.vertical_causal,
         .predictable_termination = encode_options.predictable_termination,
         .segmentation_symbols = encode_options.segmentation_symbols,
+        .high_throughput = encode_options.high_throughput,
     };
 }
 
@@ -2193,7 +2208,7 @@ pub fn encodeLosslessSampledPlanarWithOptions(
     if (options.transform != .reversible_5_3 or options.quantization != .none or
         options.mct != .none or options.progression != .rpcl or
         options.layers == 0 or options.layers > max_quality_layers or
-        options.rate_count != 0 or
+        options.rate_count != 0 or options.high_throughput or
         options.emit_temporary_payload_sidecar or options.component_coding.len != 0 or options.roi_regions.len != 0 or
         options.t1_backend != .iso_mq or options.bypass or options.terminate_all or
         options.reset_context or options.vertical_causal or
@@ -2612,7 +2627,7 @@ fn sampledMainHeaderBytes(
 ) ![]u8 {
     var out: std.ArrayList(u8) = .empty;
     errdefer out.deinit(allocator);
-    try appendSizForComponents(allocator, &out, profile);
+    try appendSizAndCapabilities(allocator, &out, profile, encode_options, reversibleMagnitudeBits(sizMaxComponentDepth(profile), encode_options));
     try appendCod(allocator, &out, levels, encode_options);
     try appendQcd(allocator, &out, levels, bit_depth, encode_options);
     return out.toOwnedSlice(allocator);
@@ -5157,6 +5172,7 @@ fn encodeLosslessWithOptionsMeasured(
     timings: ?*EncodeTimings,
 ) ![]u8 {
     const total_start = monotonicNs();
+    try validateHighThroughputRequest(options);
 
     if (rgb.width > std.math.maxInt(u32) or rgb.height > std.math.maxInt(u32)) {
         return CodestreamError.ImageTooLarge;
@@ -5317,7 +5333,7 @@ fn assembleSingleTileCodestream(
     errdefer out.deinit(allocator);
 
     try appendMarker(allocator, &out, .soc);
-    try appendSizForComponents(allocator, &out, .{
+    const siz = SizProfile{
         .width = @intCast(input.width),
         .height = @intCast(input.height),
         .bit_depth = input.bit_depth,
@@ -5326,7 +5342,12 @@ fn assembleSingleTileCodestream(
         .component_signed = input.component_signed,
         .tile_width = encode_options.tile_width,
         .tile_height = encode_options.tile_height,
-    });
+    };
+    const magnitude_bits = if (input.wide_quantization) |quantization|
+        std.mem.max(u8, &quantization.bitplanes)
+    else
+        reversibleMagnitudeBits(sizMaxComponentDepth(siz), encode_options);
+    try appendSizAndCapabilities(allocator, &out, siz, encode_options, magnitude_bits);
     try appendCod(allocator, &out, levels, encode_options);
     if (input.wide_quantization) |quantization| {
         try appendQcdWideReversible(allocator, &out, levels, quantization);
@@ -21346,7 +21367,74 @@ const SizProfile = struct {
     tile_height: u32,
     tile_origin_x: u32 = 0,
     tile_origin_y: u32 = 0,
+    rsiz: u16 = 0,
 };
+
+/// The deepest component of `profile`.
+fn sizMaxComponentDepth(profile: SizProfile) u8 {
+    var deepest = profile.bit_depth;
+    for (profile.component_bit_depths[0..profile.components]) |depth| deepest = @max(deepest, depth);
+    return deepest;
+}
+
+/// SIZ, then the CAP marker segment HT code-blocks require (T.814 A.2),
+/// for magnitudes below `2^magnitude_bits`.
+fn appendSizAndCapabilities(
+    allocator: std.mem.Allocator,
+    out: *std.ArrayList(u8),
+    profile: SizProfile,
+    options: LosslessOptions,
+    magnitude_bits: u8,
+) !void {
+    var siz = profile;
+    if (options.high_throughput) siz.rsiz = profile_signaling.rsiz_cap_present;
+    try appendSizForComponents(allocator, out, siz);
+    if (options.high_throughput) try appendHighThroughputCap(allocator, out, magnitude_bits);
+}
+
+/// CAP with Pcap bit 17 (Part 15) and its Ccap15 word (T.814 A.3): every
+/// code-block HT (HTONLY) with one HT set (SINGLEHT), the same in every
+/// tile (HOMOGENEOUS), no RGN, reversible transforms only (HTREV), and the
+/// smallest MAGB set (Table 4) whose bound B covers `magnitude_bits`.
+fn appendHighThroughputCap(allocator: std.mem.Allocator, out: *std.ArrayList(u8), magnitude_bits: u8) !void {
+    var magnitude_set: u16 = 0;
+    while (magnitude_set < 31 and
+        (profile_signaling.HighThroughput{ .ccap15 = magnitude_set }).magnitudeBound() < magnitude_bits) : (magnitude_set += 1)
+    {}
+    try appendMarker(allocator, out, .cap);
+    try appendU16Be(allocator, out, 8);
+    try appendU32Be(allocator, out, profile_signaling.pcap_part15);
+    try appendU16Be(allocator, out, magnitude_set);
+}
+
+/// A bound on the magnitude bits of reversible bands of `depth`-bit
+/// components: M_b of HH, `depth + 3`, and one more after the RCT.
+fn reversibleMagnitudeBits(depth: u8, options: LosslessOptions) u8 {
+    return depth + 3 + @intFromBool(options.mct == .rct);
+}
+
+/// The HT encoder's envelope: lossless code-blocks of one cleanup pass,
+/// which leave no truncation points for rate targets; no RGN, which needs
+/// Ccap15 bit 12; and of the Part 1 mode flags only the vertically causal
+/// context, which T.814 keeps for SigProp.
+fn validateHighThroughputRequest(options: LosslessOptions) !void {
+    if (!options.high_throughput) return;
+    if (options.transform != .reversible_5_3 or options.quantization != .none or options.rate_count != 0 or
+        options.roi_regions.len != 0 or options.t1_backend != .iso_mq or options.emit_temporary_payload_sidecar or
+        options.bypass or options.reset_context or options.terminate_all or
+        options.predictable_termination or options.segmentation_symbols)
+    {
+        return CodestreamError.UnsupportedPayload;
+    }
+    for (options.component_coding) |override| {
+        const style = override.style orelse continue;
+        if (style.bypass or style.reset_context or style.terminate_all or
+            style.predictable_termination or style.segmentation_symbols)
+        {
+            return CodestreamError.UnsupportedPayload;
+        }
+    }
+}
 
 fn appendSizForComponents(
     allocator: std.mem.Allocator,
@@ -21375,7 +21463,7 @@ fn appendSizForComponents(
 
     try appendMarker(allocator, out, .siz);
     try appendU16Be(allocator, out, @intCast(lsiz_u32));
-    try appendU16Be(allocator, out, 0);
+    try appendU16Be(allocator, out, profile.rsiz);
     try appendU32Be(allocator, out, xsiz);
     try appendU32Be(allocator, out, ysiz);
     try appendU32Be(allocator, out, profile.image_origin_x);
@@ -22835,6 +22923,7 @@ fn buildPcrdData(
         .vertical_causal = options.vertical_causal,
         .predictable_termination = options.predictable_termination,
         .segmentation_symbols = options.segmentation_symbols,
+        .high_throughput = options.high_throughput,
     };
 
     const band_weights = try allocator.alloc(f64, bands.len);
@@ -23343,6 +23432,7 @@ fn buildRpclShadowBlock(
         .vertical_causal = options.vertical_causal,
         .predictable_termination = options.predictable_termination,
         .segmentation_symbols = options.segmentation_symbols,
+        .high_throughput = options.high_throughput,
     }, band_kind);
     var direct_distortions: [164]f64 = undefined;
     const capture_direct_distortions = options.rate_count > 0 and
@@ -23399,7 +23489,7 @@ fn buildRpclShadowBlock(
         .encoded = .{
             .location = .{ .leaf_x = 0, .leaf_y = 0 },
             .nominal_bitplanes = @max(nominal_bitplanes, segment.bitplanes),
-            .encoded_bitplanes = segment.bitplanes,
+            .encoded_bitplanes = segment.signalledBitplanes(),
             .layers = &.{},
             .payload = segment.bytes,
             .segments = segment.segments orelse &.{},
@@ -25470,6 +25560,7 @@ fn encodeLosslessMultiTileMeasured(
         .vertical_causal = encode_options.vertical_causal,
         .predictable_termination = encode_options.predictable_termination,
         .segmentation_symbols = encode_options.segmentation_symbols,
+        .high_throughput = encode_options.high_throughput,
     };
     const packet_order: tile_pipeline.PacketOrder = if (encode_options.poc_records.len != 0)
         .rpcl
@@ -25557,7 +25648,11 @@ fn appendMultiTileMainHeader(
     levels: u8,
     encode_options: LosslessOptions,
 ) !void {
-    try appendSizForComponents(allocator, out, header.siz);
+    const magnitude_bits = if (header.wide_quantization) |quantization|
+        std.mem.max(u8, &quantization.bitplanes)
+    else
+        reversibleMagnitudeBits(sizMaxComponentDepth(header.siz), encode_options);
+    try appendSizAndCapabilities(allocator, out, header.siz, encode_options, magnitude_bits);
     try appendCod(allocator, out, levels, encode_options);
     if (header.wide_quantization) |quantization| {
         try appendQcdWideReversible(allocator, out, levels, quantization);
@@ -25876,6 +25971,7 @@ fn codeBlockStyle(options: LosslessOptions) u8 {
         .vertical_causal = options.vertical_causal,
         .predictable_termination = options.predictable_termination,
         .segmentation_symbols = options.segmentation_symbols,
+        .high_throughput = options.high_throughput,
     };
     return style.toCodByte();
 }

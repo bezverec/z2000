@@ -5,6 +5,47 @@ entries are grouped by development milestone rather than semantic version.
 
 ## Unreleased
 
+### Lossless HT Encoding (0.3.0 line)
+
+- `--ht` (`LosslessOptions.high_throughput`) codes every code-block with the
+  HT block coder of T.814 instead of the Part 1 MQ coder: one HT cleanup
+  pass at bit-plane 0, so each block is lossless with no refinement passes,
+  and the packet header signals `M_b - 1` missing bit-planes for it.
+  `ht.Encoder` runs the cleanup decoding procedures backward: quad
+  significance, exponents E_n, kappa_q and u_q, CxtVLC codewords chosen per
+  context, significance, and implicit-top-bit pattern for the fewest bits
+  (each eps_k bit saves a MagSgn bit), U-VLC pairs with the initial-row MEL
+  symbol, and the MagSgn, MEL, and VLC streams with their stuffing rules,
+  the MEL and VLC tails sharing a byte as OpenJPH writes them, and Scup in
+  the last twelve bits. The main header gets Rsiz bit 14 and a CAP with
+  Pcap bit 17 and Ccap15 HTONLY, SINGLEHT, HOMOGENEOUS, HTREV, and the
+  smallest MAGB set covering the deepest band's M_b (B = 12 for 8-bit RGB
+  with the RCT, as Kakadu writes); COD/COC style bytes carry bit 6. A JP2
+  file around an HT codestream is branded `jph ` (T.814 D.5).
+- Every writer takes it: the RGB, gray, and planar raster encoders on one
+  tile or a grid, in every progression order, with POC, PPM/PPT, SOP/EPH,
+  tile-part divisions, untargeted layers, and the vertically causal style;
+  and the wide native encoder (`zraw-to-j2k --ht`) up to 38 bits, including
+  its componentwise path with per-component COC. Rate targets (no truncation
+  points in one cleanup pass), 9/7, ROI, and the other Part 1 mode flags are
+  `UnsupportedPayload` for now; the sampled encoder refuses HT.
+- Evidence: a randomized unit test codes blocks from 1x1 to 1024x4 with
+  magnitudes up to 2^37 and decodes them back exactly through `ht.Decoder`;
+  the encode tables are checked to cover every quad the encoder meets.
+  Kakadu 8.4.1, Grok 20.4.19, OpenJPEG 2.5.4, and z2000 decode z2000's HT
+  JPH files to the source image exactly: 2048x2048 RGB and 33 option and
+  input combinations (12-bit gray, 12- and 16-bit RGB, RGBA, 1-bit, tiles
+  down to 37x29, layers, LRCP/CPRL/PCRL, precincts, PPM, levels 0 and 7,
+  blocks of 8 and 16; OpenJPEG's RGBA TIFF differs alike for Part 1). All 23
+  T.803 profile-0/1 layouts (signed, subsampled, origins, many components)
+  coded through `zraw-to-j2k --ht` decode exactly in z2000 and give the same
+  Kakadu PGX planes as the Part 1 coding, also on 64x64 tiles with two
+  layers in PCRL. The 2048x2048 RGB file is 10,078,575 bytes against
+  Kakadu's 10,075,594 for `Cmodes=HT` and 6,220,934 for z2000's Part 1.
+- Speed (ReleaseFast, that image): one thread encodes in about 210 ms with
+  HT against 560 ms Part 1 (Kakadu: about 150 ms HT, 730 ms Part 1 for the
+  whole process), and twenty threads in 38 ms against 68 ms.
+
 ### Mixed HT And Part 1 Code-Blocks Decode (0.3.0 line)
 
 - A tile-component whose SPcod/SPcoc sets bits 6 and 7 (T.814 Table A.4)

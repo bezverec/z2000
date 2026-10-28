@@ -345,6 +345,12 @@ here so they are not rediscovered as new.
   570, as on the Part 1 `p0_06` the stream was transcoded from: a Maxshift
   ROI with truncated background reconstructs differently, and all three are
   outside the class-1 reference by over 350.
+- **All three decode z2000's HT encoder output exactly** (`--ht`, one
+  lossless cleanup pass per block): RGB, gray, and RGBA at 1 to 16 bits on
+  tiles, layers, every progression order, precincts, and PPM. OpenJPEG's
+  TIFF of an RGBA file differs from the source in 527 samples whether the
+  file is HT or Part 1 (its alpha handling), so compare RGBA against Kakadu
+  and Grok.
 
 ## Methodological Cautions
 

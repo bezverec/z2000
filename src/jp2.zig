@@ -601,12 +601,16 @@ fn wrapCodestreamHeader(
     profile: WrapProfile,
     codestream: []const u8,
 ) ![]u8 {
+    // An HTJ2K codestream goes in a JPH file, a Part 1 one in a JP2 file
+    // (T.814 D.5).
+    const high_throughput = codestreamDeclaresHighThroughput(codestream);
     try validateCodestreamPayload(allocator, codestream, .{
         .width = profile.width,
         .height = profile.height,
         .components = profile.components,
         .bits_per_component = profile.bits_per_component,
         .component_bit_depths = profile.component_bit_depths,
+        .high_throughput = high_throughput,
     }, null);
     if (codestream.len > std.math.maxInt(u32) - 8) return Jp2Error.CodestreamTooLarge;
 
@@ -617,9 +621,10 @@ fn wrapCodestreamHeader(
 
     var ftyp: std.ArrayList(u8) = .empty;
     defer ftyp.deinit(allocator);
-    try appendFourcc(allocator, &ftyp, "jp2 ");
+    const brand = if (high_throughput) "jph " else "jp2 ";
+    try appendFourcc(allocator, &ftyp, brand);
     try appendU32Be(allocator, &ftyp, 0);
-    try appendFourcc(allocator, &ftyp, "jp2 ");
+    try appendFourcc(allocator, &ftyp, brand);
     try appendBox(allocator, &out, .file_type, ftyp.items);
 
     var jp2h: std.ArrayList(u8) = .empty;
@@ -1698,6 +1703,20 @@ fn validateFileTypeBox(payload: []const u8) !bool {
     }
     if (!compatible) return Jp2Error.UnsupportedProfile;
     return brand == brand_jph;
+}
+
+/// Whether the codestream's SIZ sets Rsiz bit 14 and the CAP marker
+/// segment after it declares Part 15; the payload audit checks the rest.
+fn codestreamDeclaresHighThroughput(codestream: []const u8) bool {
+    if (codestream.len < 8) return false;
+    const rsiz_offset = 6;
+    const lsiz = std.mem.readInt(u16, codestream[4..6], .big);
+    const cap_offset = 4 + @as(usize, lsiz);
+    if (codestream.len < cap_offset + 8 or (std.mem.readInt(u16, codestream[rsiz_offset..][0..2], .big) & profile_signaling.rsiz_cap_present) == 0) {
+        return false;
+    }
+    if (std.mem.readInt(u16, codestream[cap_offset..][0..2], .big) != marker_cap) return false;
+    return (std.mem.readInt(u32, codestream[cap_offset + 4 ..][0..4], .big) & profile_signaling.pcap_part15) != 0;
 }
 
 fn validateCodestreamPayload(

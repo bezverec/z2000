@@ -51,7 +51,7 @@ zig build run -- j2k-to-pgx input.j2k component.pgx [--component N] [--tile-inde
 zig build run -- *.j2c .pgx [j2k-to-pgx options]
 zig build run -- j2k-to-zraw input.j2k components.zraw [--tile-index N|--region X,Y,W,H] [--layers N] [--reduce N] [--threads N] [--t1-backend iso-mq|legacy-mq]
 zig build run -- *.j2c .zraw [j2k-to-zraw options]
-zig build run -- zraw-to-j2k components.zraw output.j2k [--tile W,H] [--mct none|rct] [--component C:levels=N/block=WxH/precincts=[w,h]../bypass/reset-context/terminate-all/vertical-causal/predictable-termination/segmentation-symbols/style=none] [--roi [C:]X,Y,W,H] [--rates R1,R2,...] [--progression ORDER] [--tile-parts R|L|C|P|none] [--poc RECORDS] [--poc-location main|tile] [--levels N] [--layers N] [--block N] [--sop|--no-sop] [--eph|--no-eph] [--tlm|--no-tlm] [--ppm] [--ppt] [--threads N] [--bypass] [--reset-context] [--terminate-all] [--vertical-causal] [--predictable-termination] [--segmentation-symbols]
+zig build run -- zraw-to-j2k components.zraw output.j2k [--tile W,H] [--mct none|rct] [--component C:levels=N/block=WxH/precincts=[w,h]../bypass/reset-context/terminate-all/vertical-causal/predictable-termination/segmentation-symbols/style=none] [--roi [C:]X,Y,W,H] [--rates R1,R2,...] [--progression ORDER] [--tile-parts R|L|C|P|none] [--poc RECORDS] [--poc-location main|tile] [--levels N] [--layers N] [--block N] [--sop|--no-sop] [--eph|--no-eph] [--tlm|--no-tlm] [--ppm] [--ppt] [--threads N] [--ht] [--bypass] [--reset-context] [--terminate-all] [--vertical-causal] [--predictable-termination] [--segmentation-symbols]
 ```
 
 `--version` (or `-V`) prints the generated SemVer application version including
@@ -229,6 +229,7 @@ Important `tiff-to-jp2` options:
 - `--tile-parts none|R|L|C|P`
 - `--sop`, `--eph`, `--ppm`, `--ppt`, `--tlm`
 - `--t1-backend iso-mq|legacy-mq`
+- `--ht` (HTJ2K block coder, lossless; writes a JPH file)
 - `--bypass`
 - `--threads N`
 - `--debug-temp-sidecar`

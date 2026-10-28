@@ -1,6 +1,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const build_options = @import("build_options.zig");
+const ht = @import("ht.zig");
 const mq = @import("mq.zig");
 const mq_iso = @import("mq_iso.zig");
 const simd = @import("simd.zig");
@@ -191,12 +192,22 @@ pub const CodeBlockSegment = struct {
     /// Terminated codeword segment table for BYPASS-style multi-segment
     /// payloads; null means one continuous segment.
     segments: ?[]SegmentSpan = null,
+    /// An HT code-block (ITU-T T.814): one cleanup pass coding every
+    /// magnitude bit, `bitplanes` of them, down to bit-plane 0.
+    high_throughput: bool = false,
 
     pub fn deinit(self: *CodeBlockSegment, allocator: std.mem.Allocator) void {
         allocator.free(self.passes);
         allocator.free(self.bytes);
         if (self.segments) |segments| allocator.free(segments);
         self.* = undefined;
+    }
+
+    /// The coded bit-planes the packet header signals, M_b less the missing
+    /// MSBs: an HT cleanup pass ends at bit-plane `M_b - 1 - P` (T.814 B.3),
+    /// so a lossless HT block counts one whatever its magnitudes.
+    pub fn signalledBitplanes(self: CodeBlockSegment) u8 {
+        return if (self.high_throughput and self.pass_count > 0) 1 else self.bitplanes;
     }
 
     pub fn truncationPointForPasses(self: CodeBlockSegment, pass_count: u16) !TruncationPoint {
@@ -309,12 +320,14 @@ pub const BlockScratch = struct {
     refined: std.ArrayList(bool) = .empty,
     passes: std.ArrayList(Pass) = .empty,
     symbols: std.ArrayList(Symbol) = .empty,
+    high_throughput: ?ht.Encoder(i64) = null,
 
     pub fn init(allocator: std.mem.Allocator) BlockScratch {
         return .{ .allocator = allocator };
     }
 
     pub fn deinit(self: *BlockScratch) void {
+        if (self.high_throughput) |*encoder| encoder.deinit();
         self.significant.deinit(self.allocator);
         self.visited.deinit(self.allocator);
         self.became_significant.deinit(self.allocator);
@@ -1698,12 +1711,14 @@ pub const DirectBlockScratch = struct {
     raw_writer: ?RawBitWriter = null,
     current_pass_distortion: ?*f64 = null,
     encode_pass_stats: ?*EncodePassStats = null,
+    high_throughput: ?ht.Encoder(i32) = null,
 
     pub fn init(allocator: std.mem.Allocator) DirectBlockScratch {
         return .{ .allocator = allocator };
     }
 
     pub fn deinit(self: *DirectBlockScratch) void {
+        if (self.high_throughput) |*encoder| encoder.deinit();
         if (self.encoder) |*encoder| encoder.deinit();
         if (self.iso_encoder) |*encoder| encoder.deinit();
         if (self.raw_writer) |*writer| writer.deinit();
@@ -5990,6 +6005,12 @@ fn encodeCodeBlockSegmentDirectIsoScratchInternal(
     style: CodeBlockStyle,
     pass_distortions: []f64,
 ) !CodeBlockSegment {
+    if (style.high_throughput) {
+        // One HT cleanup pass has no PCRD truncation points to weigh.
+        if (track_distortion) return EbcotError.InvalidBlock;
+        if (scratch.high_throughput == null) scratch.high_throughput = ht.Encoder(i32).init(scratch.allocator);
+        return encodeCodeBlockSegmentHighThroughput(i32, &scratch.high_throughput.?, source_plane, source_stride, source_rect);
+    }
     try validateImplementedStyleAllowBypass(style);
     if (style.terminate_all) return EbcotError.InvalidBlock;
     scratch.reset();
@@ -6163,6 +6184,65 @@ inline fn recordRefinementDistortion(
 fn estimatedIsoMqByteCapacity(area: usize, bitplanes: u8) usize {
     const symbol_bound = area * @as(usize, bitplanes) * 4;
     return symbol_bound + 64;
+}
+
+/// The wide encoder's HT code-block, through the encoder kept in `scratch`.
+pub fn encodeCodeBlockSegmentHighThroughputWide(
+    scratch: *BlockScratch,
+    plane: []const i64,
+    stride: usize,
+    rect: subband.Rect,
+) !CodeBlockSegment {
+    if (scratch.high_throughput == null) scratch.high_throughput = ht.Encoder(i64).init(scratch.allocator);
+    return encodeCodeBlockSegmentHighThroughput(i64, &scratch.high_throughput.?, plane, stride, rect);
+}
+
+/// An HT code-block (ITU-T T.814) of one cleanup pass at bit-plane 0, which
+/// codes the block losslessly; an all-zero block has no passes. The segment
+/// owns its bytes, allocated by the encoder's allocator.
+pub fn encodeCodeBlockSegmentHighThroughput(
+    comptime Coefficient: type,
+    encoder: *ht.Encoder(Coefficient),
+    plane: []const Coefficient,
+    stride: usize,
+    rect: subband.Rect,
+) !CodeBlockSegment {
+    if (rect.width == 0 or rect.height == 0 or rect.width * rect.height > max_codeblock_area) return EbcotError.InvalidBlock;
+    const origin = std.math.add(usize, std.math.mul(usize, rect.y, stride) catch return EbcotError.InvalidBlock, rect.x) catch
+        return EbcotError.InvalidBlock;
+    if (origin > plane.len) return EbcotError.InvalidBlock;
+    const cleanup = encoder.encode(plane[origin..], stride, rect.width, rect.height) catch |err| switch (err) {
+        error.InvalidBlock => return EbcotError.InvalidBlock,
+        error.OutOfMemory => return error.OutOfMemory,
+    };
+    const allocator = encoder.allocator;
+    if (cleanup.bitplanes == 0) {
+        return .{ .bitplanes = 0, .non_zero_count = 0, .pass_count = 0, .byte_length = 0, .passes = &.{}, .bytes = &.{}, .high_throughput = true };
+    }
+    var non_zero_count: u32 = 0;
+    for (0..rect.height) |row| {
+        for (plane[origin + row * stride ..][0..rect.width]) |sample| non_zero_count += @intFromBool(sample != 0);
+    }
+    const bytes = try allocator.dupe(u8, cleanup.bytes);
+    errdefer allocator.free(bytes);
+    const passes = try allocator.alloc(CodeBlockPassPayload, 1);
+    passes[0] = .{
+        .kind = .cleanup,
+        .magnitude_bitplane = 0,
+        .symbol_count = non_zero_count,
+        .byte_offset = 0,
+        .byte_length = bytes.len,
+        .cumulative_bytes = bytes.len,
+    };
+    return .{
+        .bitplanes = cleanup.bitplanes,
+        .non_zero_count = non_zero_count,
+        .pass_count = 1,
+        .byte_length = bytes.len,
+        .passes = passes,
+        .bytes = bytes,
+        .high_throughput = true,
+    };
 }
 
 fn ownedSegmentFromDirectIsoScratch(

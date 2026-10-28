@@ -17,8 +17,9 @@ streams decode against their references ([Part 1 corpus](docs/part1_corpus.md)).
 Neither figure nor that result is a formal ISO conformance certification.
 On `main` (the 0.3.0 line, not yet released) raw HTJ2K (Part 15)
 codestreams and JPH files decode as well, including all 40 WG1 HT
-conformance streams and 16 of the 20 WG1 JPH files; HT encoding comes
-later ([roadmap](docs/roadmap.md), section 6).
+conformance streams and 16 of the 20 WG1 JPH files, and `--ht` writes
+lossless HTJ2K codestreams and JPH files (lossy HT encoding comes later,
+[roadmap](docs/roadmap.md), section 6).
 
 The current prerelease is [`v0.2.0-rc.7`](https://github.com/bezverec/z2000/releases/tag/v0.2.0-rc.7),
 with binaries for Windows x86-64, Linux x86-64, and Linux RISC-V 64. It has no
@@ -528,6 +529,9 @@ Boolean marker and style options also accept a **--no-...** form.
   options are mutually exclusive and profile-bounded.
 - **--t1-backend BACKEND**: Use the normal **iso-mq** backend or the internal
   **legacy-mq** compatibility backend.
+- **--ht**: Code every block with the HTJ2K (Part 15) block coder, one
+  lossless cleanup pass each; the output is a JPH file (brand `jph `) and
+  needs a decoder that reads HTJ2K. Reversible 5/3 without `--rates`.
 - **--bypass**: Enable selective arithmetic-coding bypass.
 - **--reset-context**: Reset MQ contexts at coding-pass boundaries.
 - **--terminate-all**: Terminate every coding pass.

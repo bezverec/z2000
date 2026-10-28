@@ -228,7 +228,7 @@ pub const EncodedComponentBlock = struct {
         return .{
             .location = location,
             .nominal_bitplanes = nominal_bitplanes,
-            .encoded_bitplanes = self.segment.bitplanes,
+            .encoded_bitplanes = self.segment.signalledBitplanes(),
             .layers = self.layers,
             .payload = self.segment.bytes,
             .segments = if (self.segment.segments) |segments| segments else &.{},
@@ -4233,6 +4233,15 @@ const WideBlockWorker = struct {
         const options = self.options;
         var actual_style = self.style;
         actual_style.band_kind = job.band.kind;
+        if (actual_style.high_throughput) {
+            var encoded = EncodedComponentBlock{
+                .job = job,
+                .segment = try ebcot.encodeCodeBlockSegmentHighThroughputWide(scratch, self.planes[job.component], self.width, job.rect),
+            };
+            errdefer encoded.deinit(allocator);
+            encoded.layers = try computeLayerTruncations(allocator, encoded.segment, self.layers);
+            return encoded;
+        }
         const view = ebcot.encodeBlockScratchWideWithStyle(
             scratch,
             self.planes[job.component],
