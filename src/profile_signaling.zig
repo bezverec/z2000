@@ -2,6 +2,8 @@ const std = @import("std");
 
 pub const marker_cap: u16 = 0xff50;
 pub const marker_prf: u16 = 0xff56;
+/// Corresponding profile (ITU-T T.814 A.6), an HTJ2K main-header marker.
+pub const marker_cpf: u16 = 0xff59;
 
 /// Rsiz bit 14 optionally announces that a CAP marker is present. When the
 /// bit is set, the marker is mandatory; CAP itself may still be present when
@@ -17,6 +19,7 @@ const Phase = enum {
     after_siz,
     after_cap,
     after_prf,
+    after_cpf,
     closed,
 };
 
@@ -25,19 +28,24 @@ const Phase = enum {
 /// ISO/IEC 15444-1 Table A.10, which only restrict the syntax an encoder may
 /// use; see `restrictsPart1`. Part 2 extensions, CAP, PRF, and reserved
 /// profile numbers are parsed and consistency-checked before failing closed as
-/// unsupported.
+/// unsupported. A CAP declaring only Part 15 is the HTJ2K signalling, which
+/// `finishHighThroughput` hands to the caller.
 pub const State = struct {
     rsiz: u16,
     phase: Phase = .after_siz,
     saw_cap: bool = false,
     saw_prf: bool = false,
+    saw_cpf: bool = false,
+    pcap: u32 = 0,
+    high_throughput: ?HighThroughput = null,
 
     pub fn init(rsiz: u16) State {
         return .{ .rsiz = rsiz };
     }
 
     /// Observe every marker after SIZ, including segment-less reserved marker
-    /// codes. CAP must precede PRF and both must precede every other marker.
+    /// codes. CAP must precede PRF, PRF must precede CPF, and all three must
+    /// precede every other marker (T.814 A.6).
     pub fn observeMarker(self: *State, marker: u16) Error!void {
         switch (marker) {
             marker_cap => {
@@ -56,6 +64,17 @@ pub const State = struct {
                 self.saw_prf = true;
                 self.phase = .after_prf;
             },
+            marker_cpf => {
+                // Only an HTJ2K codestream defines CPF, at most once; its CAP
+                // payload has been recorded by now.
+                if ((self.phase != .after_cap and self.phase != .after_prf) or
+                    self.high_throughput == null or self.saw_cpf)
+                {
+                    return Error.InvalidCodestream;
+                }
+                self.saw_cpf = true;
+                self.phase = .after_cpf;
+            },
             else => {
                 self.phase = .closed;
                 if ((self.rsiz & rsiz_cap_present) != 0 and !self.saw_cap) {
@@ -63,6 +82,14 @@ pub const State = struct {
                 }
             },
         }
+    }
+
+    /// Validate the payload of the CAP marker just observed and keep what
+    /// the rest of the header is checked against.
+    pub fn recordCap(self: *State, payload: []const u8) Error!void {
+        try validateCap(payload);
+        self.pcap = readU32Be(payload, 0);
+        self.high_throughput = try parseHighThroughputCap(self.rsiz, payload);
     }
 
     /// Complete the main-header profile gate. CAP and PRF declarations and
@@ -76,7 +103,95 @@ pub const State = struct {
             return Error.UnsupportedPayload;
         }
     }
+
+    /// `finish` for a decoder that also takes HTJ2K: a CAP declaring Part 15
+    /// and nothing else, over a Part 1 Rsiz profile, returns its capabilities;
+    /// every other prefix is gated as by `finish`. The Rsiz profile of an
+    /// HTJ2K codestream restricts its syntax the same way (T.814 8.8).
+    pub fn finishHighThroughput(self: State) Error!?HighThroughput {
+        if ((self.rsiz & rsiz_cap_present) != 0 and !self.saw_cap) {
+            return Error.InvalidCodestream;
+        }
+        const high_throughput = self.high_throughput orelse {
+            try self.finish();
+            return null;
+        };
+        if (self.pcap != pcap_part15 or self.saw_prf or
+            !restrictsPart1(self.rsiz & ~rsiz_cap_present))
+        {
+            return Error.UnsupportedPayload;
+        }
+        return high_throughput;
+    }
 };
+
+/// The Ccap15 word of an HTJ2K CAP marker (ITU-T T.814 Table A.2).
+pub const HighThroughput = struct {
+    ccap15: u16,
+
+    pub const BlockCoders = enum {
+        /// Every code-block is an HT code-block.
+        ht_only,
+        /// Each tile-component uses one block coder throughout.
+        ht_declared,
+        /// A tile-component may mix HT and Part 1 code-blocks.
+        mixed,
+    };
+
+    pub fn blockCoders(self: HighThroughput) BlockCoders {
+        return switch (self.ccap15 >> 14) {
+            0 => .ht_only,
+            2 => .ht_declared,
+            3 => .mixed,
+            // `parseHighThroughputCap` rejects the reserved value 1.
+            else => unreachable,
+        };
+    }
+
+    /// Bit 13: a code-block may carry more than one HT set (MULTIHT).
+    pub fn multipleSets(self: HighThroughput) bool {
+        return (self.ccap15 & 0x2000) != 0;
+    }
+
+    /// Bit 12: RGN marker segments may be present.
+    pub fn regions(self: HighThroughput) bool {
+        return (self.ccap15 & 0x1000) != 0;
+    }
+
+    /// Bit 5: HT code-blocks may follow an irreversible transform (HTIRV).
+    pub fn irreversible(self: HighThroughput) bool {
+        return (self.ccap15 & 0x0020) != 0;
+    }
+
+    /// The HT cleanup magnitude bound parameter B of T.814 A.3.7.
+    pub fn magnitudeBound(self: HighThroughput) u8 {
+        const p: u8 = @intCast(self.ccap15 & 0x1f);
+        if (p == 0) return 8;
+        if (p < 20) return p + 8;
+        if (p < 31) return 4 * (p - 19) + 27;
+        return 74;
+    }
+};
+
+/// Bits 6..10 of Ccap15 are reserved, as is the value 01 of bits 14..15.
+const ccap15_reserved_bits: u16 = 0x07c0;
+
+/// The HTJ2K capabilities of a CAP payload accepted by `validateCap`, or
+/// null when it does not declare Part 15. T.814 A.2 requires Rsiz bit 14
+/// with it. Reserved Ccap15 values are left for future editions of T.814
+/// to define, so they are unsupported rather than malformed.
+pub fn parseHighThroughputCap(rsiz: u16, payload: []const u8) Error!?HighThroughput {
+    if (!capDeclaresHighThroughput(payload)) return null;
+    if ((rsiz & rsiz_cap_present) == 0) return Error.InvalidCodestream;
+    const pcap = readU32Be(payload, 0);
+    // Ccap words follow in Pcap bit order from the most significant.
+    const index: usize = @popCount(pcap >> (32 - 15 + 1));
+    const ccap15 = readU16Be(payload, 4 + 2 * index);
+    if ((ccap15 & ccap15_reserved_bits) != 0 or (ccap15 >> 14) == 1) {
+        return Error.UnsupportedPayload;
+    }
+    return .{ .ccap15 = ccap15 };
+}
 
 /// Whether `rsiz` names unrestricted Part 1 or one of its restricted profiles
 /// (ISO/IEC 15444-1 Table A.10). A profile only limits what an encoder may
@@ -122,17 +237,6 @@ pub fn capDeclaresHighThroughput(payload: []const u8) bool {
     return (readU32Be(payload, 0) & pcap_part15) != 0;
 }
 
-/// Rejects a CAP payload accepted by `validateCap` that declares Part 15. An
-/// HTJ2K codestream continues with syntax Part 1 does not define (the CPF
-/// marker, the HT bits of SPcod and SPcoc), so a Part 1 decoder reports it
-/// as unsupported here rather than as malformed later; without the Rsiz
-/// bit 14 that T.814 A.2 requires, the declaration itself is malformed.
-pub fn rejectHighThroughputCap(rsiz: u16, payload: []const u8) Error!void {
-    if (!capDeclaresHighThroughput(payload)) return;
-    if ((rsiz & rsiz_cap_present) == 0) return Error.InvalidCodestream;
-    return Error.UnsupportedPayload;
-}
-
 /// Validate a PRF payload excluding Lprf. Words use little-word order; the
 /// final word must be nonzero so the representation is canonical. The numeric
 /// value need not be materialized because every current PRF number is outside
@@ -140,6 +244,13 @@ pub fn rejectHighThroughputCap(rsiz: u16, payload: []const u8) Error!void {
 pub fn validatePrf(payload: []const u8) Error!void {
     if (payload.len < 2 or payload.len % 2 != 0) return Error.InvalidCodestream;
     if (readU16Be(payload, payload.len - 2) == 0) return Error.InvalidCodestream;
+}
+
+/// Validate a CPF payload excluding Lcpf: Pcpf words coded like PRF's, the
+/// last nonzero (T.814 A.6). CPFnum only names the Part 1 profile the
+/// codestream transcodes to, which decoding does not need.
+pub fn validateCpf(payload: []const u8) Error!void {
+    return validatePrf(payload);
 }
 
 fn readU16Be(bytes: []const u8, offset: usize) u16 {
@@ -157,9 +268,6 @@ test "CAP payload count follows Pcap population" {
     try validateCap(&.{ 0x80, 0x00, 0x00, 0x01, 0x12, 0x34, 0xab, 0xcd });
     try std.testing.expect(!capDeclaresHighThroughput(&.{ 0x80, 0x00, 0x00, 0x01, 0x12, 0x34, 0xab, 0xcd }));
     try std.testing.expect(capDeclaresHighThroughput(&.{ 0x00, 0x02, 0x00, 0x00, 0x00, 0x03 }));
-    try rejectHighThroughputCap(rsiz_cap_present, &.{ 0x80, 0x00, 0x00, 0x01, 0x12, 0x34, 0xab, 0xcd });
-    try std.testing.expectError(Error.UnsupportedPayload, rejectHighThroughputCap(rsiz_cap_present, &.{ 0x00, 0x02, 0x00, 0x00, 0x00, 0x03 }));
-    try std.testing.expectError(Error.InvalidCodestream, rejectHighThroughputCap(0, &.{ 0x00, 0x02, 0x00, 0x00, 0x00, 0x03 }));
     try std.testing.expectError(Error.InvalidCodestream, validateCap(&.{ 0, 0, 0, 0, 0, 0 }));
     try std.testing.expectError(Error.InvalidCodestream, validateCap(&.{ 0x80, 0, 0, 1, 0, 1 }));
     try std.testing.expectError(Error.InvalidCodestream, validateCap(&.{ 0x80, 0, 0, 0, 0, 1, 0 }));
@@ -226,4 +334,76 @@ test "profile prefix enforces CAP PRF order and Rsiz consistency" {
     var cap_after_prf = State.init(4095);
     try cap_after_prf.observeMarker(marker_prf);
     try std.testing.expectError(Error.InvalidCodestream, cap_after_prf.observeMarker(marker_cap));
+}
+
+test "Part 15 CAP yields the Ccap15 capabilities" {
+    const cap = [_]u8{ 0x00, 0x02, 0x00, 0x00, 0x18, 0x23 };
+    const ht = (try parseHighThroughputCap(rsiz_cap_present, &cap)).?;
+    try std.testing.expectEqual(HighThroughput.BlockCoders.ht_only, ht.blockCoders());
+    try std.testing.expect(!ht.multipleSets());
+    try std.testing.expect(ht.regions());
+    try std.testing.expect(ht.irreversible());
+    try std.testing.expectEqual(@as(u8, 11), ht.magnitudeBound());
+    try std.testing.expectEqual(@as(u8, 8), (HighThroughput{ .ccap15 = 0 }).magnitudeBound());
+    try std.testing.expectEqual(@as(u8, 27), (HighThroughput{ .ccap15 = 19 }).magnitudeBound());
+    try std.testing.expectEqual(@as(u8, 31), (HighThroughput{ .ccap15 = 20 }).magnitudeBound());
+    try std.testing.expectEqual(@as(u8, 67), (HighThroughput{ .ccap15 = 29 }).magnitudeBound());
+    try std.testing.expectEqual(@as(u8, 74), (HighThroughput{ .ccap15 = 31 }).magnitudeBound());
+    try std.testing.expectEqual(HighThroughput.BlockCoders.ht_declared, (HighThroughput{ .ccap15 = 0x8000 }).blockCoders());
+    try std.testing.expectEqual(HighThroughput.BlockCoders.mixed, (HighThroughput{ .ccap15 = 0xd800 }).blockCoders());
+
+    // The Part 2 word comes first when Pcap^2 is also set.
+    const two = [_]u8{ 0x40, 0x02, 0x00, 0x00, 0xff, 0xff, 0x20, 0x00 };
+    try validateCap(&two);
+    try std.testing.expect((try parseHighThroughputCap(rsiz_cap_present, &two)).?.multipleSets());
+
+    try std.testing.expectEqual(@as(?HighThroughput, null), try parseHighThroughputCap(rsiz_cap_present, &.{ 0x80, 0x00, 0x00, 0x01, 0x12, 0x34, 0xab, 0xcd }));
+    try std.testing.expectError(Error.InvalidCodestream, parseHighThroughputCap(0, &cap));
+    try std.testing.expectError(Error.UnsupportedPayload, parseHighThroughputCap(rsiz_cap_present, &.{ 0x00, 0x02, 0x00, 0x00, 0x40, 0x00 }));
+    try std.testing.expectError(Error.UnsupportedPayload, parseHighThroughputCap(rsiz_cap_present, &.{ 0x00, 0x02, 0x00, 0x00, 0x00, 0x40 }));
+}
+
+test "HTJ2K prefix orders CPF and gates the profile" {
+    const cap = [_]u8{ 0x00, 0x02, 0x00, 0x00, 0x00, 0x03 };
+    var state = State.init(rsiz_cap_present);
+    try state.observeMarker(marker_cap);
+    try state.recordCap(&cap);
+    try state.observeMarker(marker_cpf);
+    try validateCpf(&.{ 0x00, 0x02 });
+    try std.testing.expectError(Error.InvalidCodestream, state.observeMarker(marker_cpf));
+    state = State.init(rsiz_cap_present);
+    try state.observeMarker(marker_cap);
+    try state.recordCap(&cap);
+    try state.observeMarker(marker_cpf);
+    try std.testing.expectError(Error.InvalidCodestream, state.observeMarker(marker_prf));
+    try state.observeMarker(0xff52);
+    try std.testing.expectEqual(@as(u16, 3), (try state.finishHighThroughput()).?.ccap15);
+    try std.testing.expectError(Error.UnsupportedPayload, state.finish());
+
+    // CPF needs a Part 15 CAP before it, and nothing else in between.
+    var no_cap = State.init(0);
+    try std.testing.expectError(Error.InvalidCodestream, no_cap.observeMarker(marker_cpf));
+    var part2_cap = State.init(rsiz_cap_present);
+    try part2_cap.observeMarker(marker_cap);
+    try part2_cap.recordCap(&.{ 0x80, 0x00, 0x00, 0x01, 0x12, 0x34, 0xab, 0xcd });
+    try std.testing.expectError(Error.InvalidCodestream, part2_cap.observeMarker(marker_cpf));
+    var late = State.init(rsiz_cap_present);
+    try late.observeMarker(marker_cap);
+    try late.recordCap(&cap);
+    try late.observeMarker(0xff52);
+    try std.testing.expectError(Error.InvalidCodestream, late.observeMarker(marker_cpf));
+    try std.testing.expectError(Error.InvalidCodestream, validateCpf(&.{ 0x00, 0x00 }));
+
+    // Part 15 with Part 2, or over a reserved Rsiz profile, stays unsupported.
+    var with_part2 = State.init(rsiz_cap_present);
+    try with_part2.observeMarker(marker_cap);
+    try with_part2.recordCap(&.{ 0x40, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x03 });
+    try std.testing.expectError(Error.UnsupportedPayload, with_part2.finishHighThroughput());
+    var reserved = State.init(rsiz_cap_present | 0x0a00);
+    try reserved.observeMarker(marker_cap);
+    try reserved.recordCap(&cap);
+    try std.testing.expectError(Error.UnsupportedPayload, reserved.finishHighThroughput());
+    var plain = State.init(0);
+    try plain.observeMarker(0xff52);
+    try std.testing.expectEqual(@as(?HighThroughput, null), try plain.finishHighThroughput());
 }

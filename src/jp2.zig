@@ -1844,7 +1844,7 @@ fn validateMainHeaderMarkers(
                 }
                 saw_crg = true;
             },
-            marker_cap => profile_signaling.validateCap(payload[length_offset + 2 .. length_offset + marker_length]) catch |err|
+            marker_cap => profile_state.recordCap(payload[length_offset + 2 .. length_offset + marker_length]) catch |err|
                 return mapProfileSignalingError(err),
             marker_prf => profile_signaling.validatePrf(payload[length_offset + 2 .. length_offset + marker_length]) catch |err|
                 return mapProfileSignalingError(err),

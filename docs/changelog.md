@@ -5,6 +5,24 @@ entries are grouped by development milestone rather than semantic version.
 
 ## Unreleased
 
+### HTJ2K Signalling Is Parsed And Checked (0.3.0 line)
+
+- The main header of an HTJ2K codestream is now read in full before it is
+  refused as `UnsupportedPayload`: the Ccap15 word of the Part 15 CAP
+  (`profile_signaling.HighThroughput`: block coder set, MULTIHT, RGN, HTIRV,
+  magnitude bound B), the CPF marker (once, after CAP and PRF, before every
+  other marker), and the HT bits 6 and 7 of the COD and COC code-block
+  style. Malformed signalling is `InvalidCodestream`: an HT style bit
+  without a Part 15 CAP, CPF without one, a Part 1 tile-component in an
+  HTONLY stream, mixed coders in an HTDECLARED one, an HT tile-component
+  after the 9/7 when Ccap15 bit 5 says HTREV, RGN when bit 12 forbids it or
+  with SPrgn above 37 (T.814 A.3 to A.6). Reserved Ccap15 values and HT
+  style bits, MIXED tile-components, and Part 15 next to other
+  capabilities are `UnsupportedPayload`. 37 of the 40 WG1 HT codestreams
+  now pass all of it and stop only at the missing HT block decoder; the
+  three MIXED ones stop at their style byte. A table of 15 synthetic
+  headers covers each rule.
+
 ### HTJ2K Codestreams Fail Closed As Unsupported
 
 - A raw codestream whose CAP declares ISO/IEC 15444-15 (HTJ2K) is now

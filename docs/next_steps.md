@@ -139,8 +139,10 @@ gates, strict corruption tests, deterministic threading, current interop,
 concise docs, and benchmark provenance green. See `versioning.md`.
 
 The final `v0.2.0` is prepared: its notes are drafted in
-`docs/releases/v0.2.0.md`, and it will be published from `main` (rc.7's
-code plus the HTJ2K fail-closed error change) with `tools/release_local.ps1 -Tag v0.2.0 -SkipMacos -CreateDraft`
+`docs/releases/v0.2.0.md`, and it will be published from a `release/0.2`
+branch cut at `f659f5f` (rc.7's code plus the HTJ2K fail-closed error
+change), because `main` now carries the HTJ2K work of the 0.3.0 line, with
+`tools/release_local.ps1 -Tag v0.2.0 -SkipMacos -CreateDraft`
 once rc.7 has been out for a short test period without reported problems.
 The reporter of the rc.6 reduced-decode failure reran their integration on
 2026-10-27 (the official rc.7 Linux CLI and a source-built library behind
@@ -1074,11 +1076,27 @@ rather than silently broadening the Part 1 claim.
 HTJ2K is the planned main program after `v0.2.0` (`roadmap.md`, section 6,
 has the order and the evidence). Done, 2026-10-27: a Part 15 CAP fails
 closed as `UnsupportedPayload` instead of `InvalidCodestream`, pinned by a
-Kakadu `Cmodes=HT` fixture in the unit tests and the corpus. Next: parse
-Ccap15, CPF, and the HT code-block style bits (HTONLY and SINGLEHT first),
-then the HT block decoder against the WG1 HT conformance sets already in
-the Part 4 checkout (`htj2k_bsets_profile0/1`, `testfiles_jph`), then JPH,
-then the HT encoder, lossless first.
+Kakadu `Cmodes=HT` fixture in the unit tests and the corpus. Done,
+2026-10-28: Ccap15, CPF, and the HT code-block style bits are parsed and
+checked against each other; 37 of the 40 WG1 HT codestreams pass the whole
+main header and stop at the missing block decoder, the three MIXED ones at
+their style byte. Next: the HT block decoder against the WG1 HT
+conformance sets already in the Part 4 checkout (`htj2k_bsets_profile0/1`,
+`testfiles_jph`), then JPH, then the HT encoder, lossless first.
+
+The HT packet headers need one rule T.814 leaves implicit. Kakadu's
+transcodes of multi-layer Part 1 streams keep each packet's coding passes,
+so the passes before the final cleanup become placeholder passes (`3 P0`
+of them), and a contribution of only placeholder passes is legal (B.3,
+note 4). Where a contribution's codeword segments split depends on `P0`,
+which the decoder learns only at the first HT cleanup pass. The FFmpeg
+decoder (placeholder-pass patch of June 2024, by the OpenHTJ2K author,
+after WG1's guideline on placeholder passes and multiple HT sets) reads it
+speculatively: the cleanup pass can only sit at the last pass index
+that is a multiple of 3 in the contribution, so the first length is read with that
+segment's bit count; non-zero is the cleanup (length at least 2), zero
+means placeholders only, and the rest of the wider field is read and must
+be zero too. OpenJPH assumes the first contribution holds the cleanup.
 
 ## Parallel Performance Track
 

@@ -217,6 +217,9 @@ pub const CodeBlockStyle = struct {
     vertical_causal: bool = false,
     predictable_termination: bool = false,
     segmentation_symbols: bool = false,
+    /// SPcod/SPcoc bit 6 of an HTJ2K codestream: HT code-blocks (ITU-T
+    /// T.814), which use only `vertical_causal` of the flags above.
+    high_throughput: bool = false,
 
     pub fn fromCodByte(byte: u8) ?CodeBlockStyle {
         if ((byte & ~@as(u8, 0x3f)) != 0) return null;
@@ -238,6 +241,7 @@ pub const CodeBlockStyle = struct {
         if (self.vertical_causal) byte |= 0x08;
         if (self.predictable_termination) byte |= 0x10;
         if (self.segmentation_symbols) byte |= 0x20;
+        if (self.high_throughput) byte |= 0x40;
         return byte;
     }
 

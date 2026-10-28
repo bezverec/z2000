@@ -139,8 +139,9 @@ archives; it serves new HT content and transcoding.
 Order, each step under the normal slice gates:
 
 1. Signalling: a Part 15 CAP fails closed as unsupported (done, 2026-10-27);
-   then parse Ccap15, CPF, and the HT bits of SPcod/SPcoc, accepting the
-   HTONLY, SINGLEHT set first and keeping MIXED and MULTIHT closed.
+   Ccap15, CPF, and the HT bits of SPcod/SPcoc are parsed and checked
+   against each other (done, 2026-10-28), with MIXED tile-components still
+   closed.
 2. HT block decoder: Cleanup (MEL, CxtVLC tables of Annex C, U-VLC, MagSgn),
    SigProp, MagRef, and the Annex B packet rules (HT segments, placeholder
    passes, Lblock). Evidence: the WG1 HT conformance streams already in the
