@@ -1078,11 +1078,14 @@ has the order and the evidence). Done, 2026-10-27: a Part 15 CAP fails
 closed as `UnsupportedPayload` instead of `InvalidCodestream`, pinned by a
 Kakadu `Cmodes=HT` fixture in the unit tests and the corpus. Done,
 2026-10-28: Ccap15, CPF, and the HT code-block style bits are parsed and
-checked against each other; 37 of the 40 WG1 HT codestreams pass the whole
-main header and stop at the missing block decoder, the three MIXED ones at
-their style byte. Next: the HT block decoder against the WG1 HT
-conformance sets already in the Part 4 checkout (`htj2k_bsets_profile0/1`,
-`testfiles_jph`), then JPH, then the HT encoder, lossless first.
+checked against each other. Done, 2026-10-28: the HT block decoder
+(`ht.zig`) and the HT Tier-2 rules decode all 37 non-MIXED WG1 HT
+codestreams and the codestreams of the 20 WG1 JPH files; the changelog has
+the evidence. Next, in order: JPH files (the `jph ` brand and H.273 colour,
+step 3), the HT decoder's speed (the reason HT exists; a straightforward
+per-sample implementation of clause 7 today, to be measured against Kakadu
+and OpenJPH before any rewrite), MIXED tile-components and MULTIHT, then
+the HT encoder, lossless first.
 
 The HT packet headers need one rule T.814 leaves implicit. Kakadu's
 transcodes of multi-layer Part 1 streams keep each packet's coding passes,

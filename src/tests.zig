@@ -27,6 +27,7 @@ const rate_alloc = @import("rate_alloc.zig");
 const simd = @import("simd.zig");
 const subband = @import("subband.zig");
 const t2 = @import("t2.zig");
+const ht = @import("ht.zig");
 const tile_grid = @import("tile_grid.zig");
 const tile_pipeline = @import("tile_pipeline.zig");
 const tlm_parser = @import("tlm.zig");
@@ -40,6 +41,10 @@ const wavelet_int = @import("wavelet_int.zig");
 
 test "Part 1 corpus runner unit tests are linked into the main test binary" {
     _ = part1_corpus;
+}
+
+test "HT block decoder unit tests are linked into the main test binary" {
+    _ = ht;
 }
 
 test "native sample carrier preserves mixed signed 1 to 38 bit SIZ layouts" {
@@ -14622,26 +14627,168 @@ test "planar multi-tile decode accepts every progression order" {
     }
 }
 
-test "HTJ2K codestreams fail closed as unsupported" {
+test "HT packet headers split contributions around placeholder and HT set passes" {
+    const allocator = std.testing.allocator;
+    const Step = struct {
+        first_pass: u16,
+        passes: u16,
+        /// Bits after the Lblock comma code (one 0 bit), each field MSB first.
+        fields: []const struct { value: u64, bits: u6 },
+        cleanup_pass: ?u16,
+        lengths: []const u64,
+    };
+    // A block whose packets carry 3 placeholder passes, then the cleanup
+    // pass (index 3) with its SigProp pass, then the MagRef pass (T.814 B).
+    const steps = [_]Step{
+        // Passes 0..2: the cleanup pass could only be pass 0, so a 3-bit
+        // field is read first; zero means placeholders, whose 4-bit field
+        // (Lblock + floor(log2 3)) then ends with one more zero bit.
+        .{ .first_pass = 0, .passes = 3, .fields = &.{ .{ .value = 0, .bits = 3 }, .{ .value = 0, .bits = 1 } }, .cleanup_pass = null, .lengths = &.{0} },
+        // Passes 3..4: a non-zero first field is the cleanup pass, and the
+        // SigProp pass gets its own codeword segment.
+        .{ .first_pass = 3, .passes = 2, .fields = &.{ .{ .value = 5, .bits = 3 }, .{ .value = 2, .bits = 3 } }, .cleanup_pass = 3, .lengths = &.{ 5, 2 } },
+        // Pass 5, MagRef, continues the refinement segment.
+        .{ .first_pass = 5, .passes = 1, .fields = &.{.{ .value = 1, .bits = 3 }}, .cleanup_pass = 3, .lengths = &.{1} },
+    };
+    var length_state = t2.SegmentLengthState{ .high_throughput = true };
+    for (steps) |step| {
+        var bytes: std.ArrayList(u8) = .empty;
+        defer bytes.deinit(allocator);
+        var writer = t2.PacketHeaderWriter.init(allocator, &bytes);
+        try writer.writeBit(false);
+        for (step.fields) |field| try writer.writeBits(field.value, field.bits);
+        try writer.finish();
+        var reader = t2.PacketHeaderReader.init(bytes.items);
+        var block = t2.DecodedPacketBlock{ .included = true, .first_inclusion = false, .zero_bitplanes = 0, .pass_count = step.passes, .byte_length = 0 };
+        try t2.readHighThroughputLengths(&reader, &length_state, step.first_pass, &block);
+        try std.testing.expectEqual(step.cleanup_pass, block.ht_cleanup_pass);
+        try std.testing.expectEqualSlices(u64, step.lengths, block.segment_lengths[0..block.segment_count]);
+    }
+    for ([_]u16{ 0, 2, 3, 5, 6, 8 }) |pass| try std.testing.expect(t2.htSegmentEndsAfterPass(0, pass));
+    for ([_]u16{ 1, 4, 7 }) |pass| try std.testing.expect(!t2.htSegmentEndsAfterPass(0, pass));
+
+    // A first cleanup segment of one byte, and placeholder passes whose
+    // wider length field is not zero, are malformed.
+    const malformed = [_][]const struct { value: u64, bits: u6 }{
+        &.{.{ .value = 1, .bits = 3 }},
+        &.{ .{ .value = 0, .bits = 3 }, .{ .value = 1, .bits = 1 } },
+    };
+    for (malformed) |fields| {
+        var bytes: std.ArrayList(u8) = .empty;
+        defer bytes.deinit(allocator);
+        var writer = t2.PacketHeaderWriter.init(allocator, &bytes);
+        try writer.writeBit(false);
+        for (fields) |field| try writer.writeBits(field.value, field.bits);
+        try writer.finish();
+        var reader = t2.PacketHeaderReader.init(bytes.items);
+        var state = t2.SegmentLengthState{ .high_throughput = true };
+        var block = t2.DecodedPacketBlock{ .included = true, .first_inclusion = true, .zero_bitplanes = 0, .pass_count = if (fields.len == 1) 1 else 3, .byte_length = 0 };
+        try std.testing.expectError(t2.PacketHeaderError.InvalidPacketHeader, t2.readHighThroughputLengths(&reader, &state, 0, &block));
+    }
+}
+
+test "Kakadu HTJ2K fixture decodes exactly on every decode path" {
     const allocator = std.testing.allocator;
     // Kakadu 8.4.1 `Creversible=yes Cmodes=HT` encode of a 32x24 RGB
-    // gradient: its CAP declares Part 15 and its COD the HT block coder
-    // (SPcod bit 6). Every raw-codestream decoder used to report it as
-    // InvalidCodestream, at the HT code-block style or, in the WG1 HT
-    // conformance streams, at the CPF marker; it is valid, only not decoded.
+    // red-to-blue gradient: HT code-blocks (ITU-T T.814) behind a Part 15
+    // CAP, 5/3 and RCT, so every path must give the gradient back exactly,
+    // as Kakadu's own decode does.
     const stream = @embedFile("testdata/kakadu-ht-rgb.j2c");
-    try std.testing.expectError(
-        codestream.CodestreamError.UnsupportedPayload,
-        codestream.decodeLosslessNativeWithOptions(allocator, stream, .{}, .{}),
-    );
-    try std.testing.expectError(
-        codestream.CodestreamError.UnsupportedPayload,
-        codestream.decodeLosslessTemporaryWithOptions(allocator, stream, .{}),
-    );
-    try std.testing.expectError(
-        codestream.CodestreamError.UnsupportedPayload,
-        codestream.decodeLosslessPlanar(allocator, stream),
-    );
+    const width = 32;
+    const height = 24;
+    const Expected = struct {
+        fn sample(component: usize, y: usize) u16 {
+            const red: u16 = @intCast((510 * (23 - y) + 23) / 46);
+            return switch (component) {
+                0 => red,
+                1 => 0,
+                else => 255 - red,
+            };
+        }
+    };
+
+    for ([_]u8{ 1, 4 }) |threads| {
+        var native = try codestream.decodeLosslessNativeWithOptions(allocator, stream, .{ .threads = threads }, .{});
+        defer native.deinit();
+        try std.testing.expectEqual(@as(usize, 3), native.planes.len);
+        for (native.planes, 0..) |plane, component| {
+            try std.testing.expectEqual(@as(usize, width * height), plane.samples.len);
+            for (plane.samples, 0..) |sample, index| {
+                try std.testing.expectEqual(@as(i64, Expected.sample(component, index / width)), sample);
+            }
+        }
+    }
+
+    var temporary = try codestream.decodeLosslessTemporaryWithOptions(allocator, stream, .{});
+    defer temporary.deinit();
+    try std.testing.expectEqual(@as(usize, width * height * 3), temporary.samples.len);
+    for (temporary.samples, 0..) |sample, index| {
+        try std.testing.expectEqual(Expected.sample(index % 3, index / 3 / width), sample);
+    }
+
+    var planar = try codestream.decodeLosslessPlanar(allocator, stream);
+    defer planar.deinit();
+    for (planar.planes, 0..) |plane, component| {
+        for (plane, 0..) |sample, index| {
+            try std.testing.expectEqual(Expected.sample(component, index / width), sample);
+        }
+    }
+}
+
+test "Kakadu HT transcodes of a layered stream decode placeholder and refinement passes" {
+    const allocator = std.testing.allocator;
+    // kdu_transcode Smodes_required=HT of two Kakadu 8.4.1 Part 1 streams
+    // of one 64x48 gray texture, 5/3, two levels, 16x16 blocks, three layers
+    // (-rate 1,2,-). The transcode keeps each packet's coding passes, so the
+    // passes a block had before its final cleanup pass become placeholder
+    // passes in the earlier layers and the HT cleanup pass arrives in the
+    // last one (T.814 B.1). The first is lossless; the second (Cmodes=CAUSAL,
+    // SCP15_limb=6) discards the passes past the magnitude bound B = 8, so
+    // most blocks end in an HT SigProp and MagRef pass with vertically
+    // causal context.
+    const lossless = @embedFile("testdata/kakadu-ht-layers-gray.j2c");
+    const bounded = @embedFile("testdata/kakadu-ht-layers-causal-b8.j2c");
+    // Kakadu 8.4.1 and Grok 20.4.19 give the same samples for all layers.
+    const bounded_full = @embedFile("testdata/kakadu-ht-layers-causal-b8.raw");
+    const bounded_two_layers = @embedFile("testdata/kakadu-ht-layers-causal-b8-l2-grok.raw");
+    const width = 64;
+    const height = 48;
+
+    var source: [width * height]i64 = undefined;
+    var state: u32 = 12345;
+    for (0..height) |y| {
+        for (0..width) |x| {
+            state = (state *% 1103515245 +% 12345) & 0x7fffffff;
+            const checker: i64 = if ((x / 8 + y / 8) % 2 != 0) 60 else 0;
+            const value = @as(i64, @intCast(x * 3 + y * 2)) + @as(i64, (state >> 16) % 41) - 20 + checker;
+            source[y * width + x] = std.math.clamp(value, 0, 255);
+        }
+    }
+
+    for ([_]u8{ 1, 4 }) |threads| {
+        var decoded = try codestream.decodeLosslessNativeWithOptions(allocator, lossless, .{ .threads = threads }, .{});
+        defer decoded.deinit();
+        try std.testing.expectEqualSlices(i64, &source, decoded.planes[0].samples);
+
+        var full = try codestream.decodeLosslessNativeWithOptions(allocator, bounded, .{ .threads = threads }, .{});
+        defer full.deinit();
+        for (full.planes[0].samples, bounded_full) |sample, reference| {
+            try std.testing.expectEqual(@as(i64, reference), sample);
+        }
+    }
+
+    // Two layers hold the cleanup pass of only some bounded blocks; the
+    // lossless stream's first layer holds placeholder passes alone, so no HT
+    // set and mid-grey everywhere. Grok 20.4.19 agrees; Kakadu 8.4.1 decodes
+    // HT blocks from every layer whatever -layers says.
+    var two_layers = try codestream.decodeLosslessNativeWithOptions(allocator, bounded, .{ .quality_layer_limit = 2 }, .{});
+    defer two_layers.deinit();
+    for (two_layers.planes[0].samples, bounded_two_layers) |sample, reference| {
+        try std.testing.expectEqual(@as(i64, reference), sample);
+    }
+    var one_layer = try codestream.decodeLosslessNativeWithOptions(allocator, lossless, .{ .quality_layer_limit = 1 }, .{});
+    defer one_layer.deinit();
+    for (one_layer.planes[0].samples) |sample| try std.testing.expectEqual(@as(i64, 128), sample);
 }
 
 test "reduced decode skips a tile that has no samples left" {

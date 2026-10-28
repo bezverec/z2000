@@ -144,10 +144,13 @@ Order, each step under the normal slice gates:
    closed.
 2. HT block decoder: Cleanup (MEL, CxtVLC tables of Annex C, U-VLC, MagSgn),
    SigProp, MagRef, and the Annex B packet rules (HT segments, placeholder
-   passes, Lblock). Evidence: the WG1 HT conformance streams already in the
-   Part 4 checkout (`htj2k_bsets_profile0/1`, 23 sets, and `testfiles_jph`
-   with references), Kakadu 8.4.1 (`Cmodes=HT`) fixtures, and OpenJPEG,
-   Grok, Kakadu, and OpenJPH as decoders.
+   passes, Lblock). Done, 2026-10-28, for HTONLY/HTDECLARED SINGLEHT
+   streams: all 37 non-MIXED WG1 HT conformance streams decode (lossless
+   transcodes against their T.803 originals' references, B-limited ones
+   against Kakadu 8.4.1 and Grok 20.4.19), and so do the codestreams of the
+   20 WG1 JPH files. OpenJPEG 2.5.4 fails on most multi-layer transcodes,
+   so it is no oracle here. Next for this step: decode speed, the point of
+   HT, measured against Kakadu and OpenJPH.
 3. JPH file format: the `jph ` brand and parametrized (H.273) colour.
 4. HT block encoder: lossless first (one Cleanup pass at bit-plane 0), then
    quantization-driven lossy, then `--rates` through complexity control

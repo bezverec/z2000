@@ -142,7 +142,18 @@
       "malformed": "bounded",
       "interop": "bounded",
       "evidence": ["PLM-framed Kakadu single-/multi-tile streams", "PLM+PLT payload cross-check", "ordered/continued/corrupt PLM tests"],
-      "note": "Bounded PLM decode is implemented for inline, PLT-coexisting, and existing packed-header paths over foreign Kakadu packet/T1 bytes. Valid PLM placement is test-produced, so independent valid-marker promotion evidence and PLM emission remain future work. Rsiz values naming Part 1 profiles decode like unrestricted Part 1; CAP, PRF, Part 2, and reserved Rsiz values fail closed."
+      "note": "Bounded PLM decode is implemented for inline, PLT-coexisting, and existing packed-header paths over foreign Kakadu packet/T1 bytes. Valid PLM placement is test-produced, so independent valid-marker promotion evidence and PLM emission remain future work. Rsiz values naming Part 1 profiles decode like unrestricted Part 1; a CAP declaring only Part 15 (HTJ2K) decodes through ht-block-coder; other CAP declarations, PRF, Part 2, and reserved Rsiz values fail closed."
+    },
+    {
+      "id": "ht-block-coder",
+      "title": "HTJ2K (Part 15) HT block decoding",
+      "parser": "bounded",
+      "strict_decode": "bounded",
+      "encode": "not_implemented",
+      "malformed": "bounded",
+      "interop": "bounded",
+      "evidence": ["37 WG1 HT conformance codestreams: lossless transcodes identical to the T.803 originals' decodes, B-limited ones against Kakadu 8.4.1 and Grok 20.4.19", "Kakadu 8.4.1 Cmodes=HT gradient fixture", "Ccap15, CPF, and HT style signalling table test"],
+      "note": "HTONLY and HTDECLARED codestreams with SINGLEHT code-blocks decode on every native path, including placeholder passes across quality layers; MIXED tile-components, MULTIHT code-blocks, JPH files, and HT encoding remain fail-closed or unimplemented."
     },
     {
       "id": "jp2-core-container",
@@ -5267,7 +5278,7 @@
       ]
     },
     {
-      "id": "kakadu-htj2k-unsupported",
+      "id": "kakadu-htj2k-rgb-lossless",
       "path": "src/testdata/kakadu-ht-rgb.j2c",
       "availability": "committed",
       "format": "j2k",
@@ -5280,10 +5291,1192 @@
         "license": "project-generated synthetic test fixture under the repository license",
         "redistribution": "committed codestream; Kakadu application not redistributed"
       },
-      "oracle": "CAP declares ISO/IEC 15444-15 (Pcap15) and COD the HT block coder; a Part 1 decoder must reject it as unsupported, not as malformed",
-      "features": ["plm-cap-prf", "reversible-53"],
+      "oracle": "src/tests.zig verifies the exact 32x24 red-to-blue gradient on the native, temporary, and planar paths; Kakadu 8.4.1 kdu_expand gives the same samples",
+      "features": ["ht-block-coder", "plm-cap-prf", "reversible-53"],
+      "expectation": "decode_pass",
+      "expected_native_sha256": "4a368e714a9e460bd1b9cb9551172afc82e117b50716271be8c669a158f7c0d0"
+    },
+    {
+      "id": "kakadu-ht-layers-gray-lossless",
+      "path": "src/testdata/kakadu-ht-layers-gray.j2c",
+      "availability": "committed",
+      "format": "j2k",
+      "decoder": "native",
+      "sha256": "acda9cd10464e6bc9d01183c2f0176f9637da5c728e560b063813d3fc7edebd7",
+      "source": {
+        "producer": "Kakadu demo applications",
+        "version": "8.4.1",
+        "origin": "locally generated 64x48 gray texture; kdu_compress Creversible=yes Clevels=2 Cblk={16,16} Clayers=3 -rate 1,2,- then kdu_transcode Smodes_required=HT",
+        "license": "project-generated synthetic test fixture under the repository license",
+        "redistribution": "committed codestream; Kakadu application not redistributed"
+      },
+      "oracle": "src/tests.zig verifies the exact source texture; placeholder passes in layers 1 and 2, the HT cleanup pass in layer 3",
+      "features": ["ht-block-coder", "reversible-53"],
+      "expectation": "decode_pass",
+      "expected_native_sha256": "6b22f7229c615076c355a91daf4ee80f141f75355aa09091c5596a9bb0a61aa2"
+    },
+    {
+      "id": "kakadu-ht-layers-causal-b8",
+      "path": "src/testdata/kakadu-ht-layers-causal-b8.j2c",
+      "availability": "committed",
+      "format": "j2k",
+      "decoder": "native",
+      "sha256": "91cef75d9411ca4347c12576625c99600728179b9fc32d5cfa8424b9662f2ded",
+      "source": {
+        "producer": "Kakadu demo applications",
+        "version": "8.4.1",
+        "origin": "locally generated 64x48 gray texture; as kakadu-ht-layers-gray-lossless with Cmodes=CAUSAL, transcoded with SCP15_limb=6",
+        "license": "project-generated synthetic test fixture under the repository license",
+        "redistribution": "committed codestream; Kakadu application not redistributed"
+      },
+      "oracle": "src/tests.zig compares Kakadu 8.4.1 and Grok 20.4.19's identical full decode, and Grok's two-layer decode; HT SigProp and MagRef passes with vertically causal context",
+      "features": ["ht-block-coder", "reversible-53", "selective-streaming-decode"],
+      "expectation": "decode_pass",
+      "expected_native_sha256": "579cee90d11a570bb337186303dec4b682e6ad7e73c97db95f787e9920966e0e"
+    },
+    {
+      "id": "wg1-htj2k-ds0-ht-01-b11",
+      "path": "htj2k_bsets_profile0/p0_01_bset/ds0_ht_01_b11.j2k",
+      "availability": "optional",
+      "root_env": "Z2000_PART4_ROOT",
+      "format": "j2k",
+      "sha256": "4f81100e4eb3b0ab03d669870034257f73c2abb837fcec1ac02962a9910b4824",
+      "source": {
+        "producer": "ITU-T T.814 | ISO/IEC 15444-15 HTJ2K conformance sets in the T.803 corpus",
+        "version": "WG1 corpus commit f6b9ede094a0bd6e1e0427e12721e3f3ee1b704b",
+        "origin": "Kakadu kdu_transcode of T.803 p0_01 to HT code-blocks, magnitude bound B=11 (p0_01_bset)",
+        "license": "JPEG 2000 standard conformance/testing grant in COPYRIGHT.txt; notice retention required",
+        "redistribution": "optional local asset; not redistributed by z2000"
+      },
+      "oracle": "lossless transcode: native samples identical to z2000's decode of p0_01, checked here against that stream's T.803 references",
+      "features": ["ht-block-coder", "siz-bounded-unsigned-components", "reversible-53"],
+      "expectation": "decode_pass",
+      "references": [{
+        "path": "reference_class0_profile0/c0p0_01.pgx",
+        "sha256": "268a50614b74bb375092d11aa21594069666568a73fe0b83f3ca9cfbda389139",
+        "format": "pgx",
+        "resolution_reduction": 0,
+        "max_peak_error": 0,
+        "max_mse": 0
+      }]
+    },
+    {
+      "id": "wg1-htj2k-ds0-ht-02-b11",
+      "path": "htj2k_bsets_profile0/p0_02_bset/ds0_ht_02_b11.j2k",
+      "availability": "optional",
+      "root_env": "Z2000_PART4_ROOT",
+      "format": "j2k",
+      "decoder": "native",
+      "sha256": "44386273c368b9454210fcef311260db72ce3d5c133f414c5ab9a832a19482fe",
+      "source": {
+        "producer": "ITU-T T.814 | ISO/IEC 15444-15 HTJ2K conformance sets in the T.803 corpus",
+        "version": "WG1 corpus commit f6b9ede094a0bd6e1e0427e12721e3f3ee1b704b",
+        "origin": "Kakadu kdu_transcode of T.803 p0_02 to HT code-blocks, magnitude bound B=11 (p0_02_bset)",
+        "license": "JPEG 2000 standard conformance/testing grant in COPYRIGHT.txt; notice retention required",
+        "redistribution": "optional local asset; not redistributed by z2000"
+      },
+      "oracle": "B-limited transcode (coding passes discarded): exact on every component against Kakadu 8.4.1 kdu_expand and Grok 20.4.19",
+      "features": ["ht-block-coder", "siz-subsampled-components", "cod-qcd-component-overrides", "progression-poc", "packet-header-placement", "reversible-53"],
+      "expectation": "decode_pass",
+      "expected_native_sha256": "9e53d827baf4726f0add7eaabdd9bd2e90362a0d160f0f343287b929e462cbef"
+    },
+    {
+      "id": "wg1-htj2k-ds0-ht-02-b12",
+      "path": "htj2k_bsets_profile0/p0_02_bset/ds0_ht_02_b12.j2k",
+      "availability": "optional",
+      "root_env": "Z2000_PART4_ROOT",
+      "format": "j2k",
+      "sha256": "053421d280326f3f11f495b3d9ea1045a822dfbcfa3217c6effbd057e9c7e239",
+      "source": {
+        "producer": "ITU-T T.814 | ISO/IEC 15444-15 HTJ2K conformance sets in the T.803 corpus",
+        "version": "WG1 corpus commit f6b9ede094a0bd6e1e0427e12721e3f3ee1b704b",
+        "origin": "Kakadu kdu_transcode of T.803 p0_02 to HT code-blocks, magnitude bound B=12 (p0_02_bset)",
+        "license": "JPEG 2000 standard conformance/testing grant in COPYRIGHT.txt; notice retention required",
+        "redistribution": "optional local asset; not redistributed by z2000"
+      },
+      "oracle": "lossless transcode: native samples identical to z2000's decode of p0_02, checked here against that stream's T.803 references",
+      "features": ["ht-block-coder", "siz-subsampled-components", "cod-qcd-component-overrides", "progression-poc", "packet-header-placement", "reversible-53"],
+      "expectation": "decode_pass",
+      "references": [{
+        "path": "reference_class0_profile0/c0p0_02.pgx",
+        "sha256": "7d7924248477c4368eadd508234545acca9f790e5cd2f888651de44b0ae9e9f9",
+        "format": "pgx",
+        "component": 0,
+        "resolution_reduction": 0,
+        "max_peak_error": 0,
+        "max_mse": 0
+      }]
+    },
+    {
+      "id": "wg1-htj2k-ds0-ht-03-b11",
+      "path": "htj2k_bsets_profile0/p0_03_bset/ds0_ht_03_b11.j2k",
+      "availability": "optional",
+      "root_env": "Z2000_PART4_ROOT",
+      "format": "j2k",
+      "decoder": "native",
+      "sha256": "49acc614f87c135c2741ca3757f86d9aa6421c8d12c9b4c34c68cc2b6f5f95b4",
+      "source": {
+        "producer": "ITU-T T.814 | ISO/IEC 15444-15 HTJ2K conformance sets in the T.803 corpus",
+        "version": "WG1 corpus commit f6b9ede094a0bd6e1e0427e12721e3f3ee1b704b",
+        "origin": "Kakadu kdu_transcode of T.803 p0_03 to HT code-blocks, magnitude bound B=11 (p0_03_bset)",
+        "license": "JPEG 2000 standard conformance/testing grant in COPYRIGHT.txt; notice retention required",
+        "redistribution": "optional local asset; not redistributed by z2000"
+      },
+      "oracle": "B-limited transcode (coding passes discarded): exact on every component against Kakadu 8.4.1 kdu_expand and Grok 20.4.19",
+      "features": ["ht-block-coder", "siz-bounded-unsigned-components", "cod-qcd-component-overrides", "progression-poc", "tiles-and-tile-parts", "roi-rgn-maxshift", "component-registration-crg"],
+      "expectation": "decode_pass",
+      "expected_native_sha256": "aefc1386adc3c641b0d7caa4fa8faa42e3474f17438345b89a8da11a675670a6"
+    },
+    {
+      "id": "wg1-htj2k-ds0-ht-03-b14",
+      "path": "htj2k_bsets_profile0/p0_03_bset/ds0_ht_03_b14.j2k",
+      "availability": "optional",
+      "root_env": "Z2000_PART4_ROOT",
+      "format": "j2k",
+      "decoder": "native",
+      "sha256": "58e7e443642069081a244e383f1a615f2921ed2f88627c19cb9b9141396525fb",
+      "source": {
+        "producer": "ITU-T T.814 | ISO/IEC 15444-15 HTJ2K conformance sets in the T.803 corpus",
+        "version": "WG1 corpus commit f6b9ede094a0bd6e1e0427e12721e3f3ee1b704b",
+        "origin": "Kakadu kdu_transcode of T.803 p0_03 to HT code-blocks, magnitude bound B=14 (p0_03_bset)",
+        "license": "JPEG 2000 standard conformance/testing grant in COPYRIGHT.txt; notice retention required",
+        "redistribution": "optional local asset; not redistributed by z2000"
+      },
+      "oracle": "lossless transcode: native samples identical to z2000's decode of p0_03, checked here against that stream's T.803 references",
+      "features": ["ht-block-coder", "siz-bounded-unsigned-components", "cod-qcd-component-overrides", "progression-poc", "tiles-and-tile-parts", "roi-rgn-maxshift", "component-registration-crg"],
+      "expectation": "decode_pass",
+      "references": [
+        {
+          "path": "reference_class0_profile0/c0p0_03r0.pgx",
+          "sha256": "29aa1042c71b3868bf607e4e3b29436604f512c392131925523a060554aea9f5",
+          "format": "pgx",
+          "component": 0,
+          "resolution_reduction": 0,
+          "crop": { "x": 0, "y": 0 },
+          "max_peak_error": 0,
+          "max_mse": 0
+        },
+        {
+          "path": "reference_class0_profile0/c0p0_03r1.pgx",
+          "sha256": "3e3e2055b0b7783d16a339447a0dcc50d6ddb2381ac5d2769d3bd4206f30a68d",
+          "format": "pgx",
+          "component": 0,
+          "resolution_reduction": 1,
+          "max_peak_error": 0,
+          "max_mse": 0
+        }
+      ]
+    },
+    {
+      "id": "wg1-htj2k-ds0-ht-04-b11",
+      "path": "htj2k_bsets_profile0/p0_04_bset/ds0_ht_04_b11.j2k",
+      "availability": "optional",
+      "root_env": "Z2000_PART4_ROOT",
+      "format": "j2k",
+      "decoder": "native",
+      "sha256": "d4b0b3152f1d606211334bf82cfd8b960eebbbd89b60bf3a04de43bec8d8f78d",
+      "source": {
+        "producer": "ITU-T T.814 | ISO/IEC 15444-15 HTJ2K conformance sets in the T.803 corpus",
+        "version": "WG1 corpus commit f6b9ede094a0bd6e1e0427e12721e3f3ee1b704b",
+        "origin": "Kakadu kdu_transcode of T.803 p0_04 to HT code-blocks, magnitude bound B=11 (p0_04_bset)",
+        "license": "JPEG 2000 standard conformance/testing grant in COPYRIGHT.txt; notice retention required",
+        "redistribution": "optional local asset; not redistributed by z2000"
+      },
+      "oracle": "B-limited transcode (coding passes discarded): within 1 LSB of Kakadu 8.4.1 kdu_expand and Grok 20.4.19 on every component (9/7 arithmetic)",
+      "features": ["ht-block-coder", "cod-qcd-component-overrides", "irreversible-97"],
+      "expectation": "decode_pass",
+      "expected_native_sha256": "0a985f3869d05ec037d53da6780447ba291845088e5fc6f74c0e175a4a9b304f"
+    },
+    {
+      "id": "wg1-htj2k-ds0-ht-04-b12",
+      "path": "htj2k_bsets_profile0/p0_04_bset/ds0_ht_04_b12.j2k",
+      "availability": "optional",
+      "root_env": "Z2000_PART4_ROOT",
+      "format": "j2k",
+      "sha256": "77ff230280d03c02f66ff79d06acae77e92126490d019e2d14de64325a0dd4e8",
+      "source": {
+        "producer": "ITU-T T.814 | ISO/IEC 15444-15 HTJ2K conformance sets in the T.803 corpus",
+        "version": "WG1 corpus commit f6b9ede094a0bd6e1e0427e12721e3f3ee1b704b",
+        "origin": "Kakadu kdu_transcode of T.803 p0_04 to HT code-blocks, magnitude bound B=12 (p0_04_bset)",
+        "license": "JPEG 2000 standard conformance/testing grant in COPYRIGHT.txt; notice retention required",
+        "redistribution": "optional local asset; not redistributed by z2000"
+      },
+      "oracle": "lossless transcode: native samples identical to z2000's decode of p0_04, checked here against that stream's T.803 references",
+      "features": ["ht-block-coder", "cod-qcd-component-overrides", "irreversible-97"],
+      "expectation": "decode_pass",
+      "references": [{
+        "path": "reference_class0_profile0/c0p0_04.pgx",
+        "sha256": "3bd0ba5ab481a5415e7272fd03a5c8463ffc223c09b3954ead086c7556502cea",
+        "format": "pgx",
+        "component": 0,
+        "resolution_reduction": 3,
+        "space": "codestream_components",
+        "max_peak_error": 33,
+        "max_mse": 55.8
+      }]
+    },
+    {
+      "id": "wg1-htj2k-ds0-ht-05-b11",
+      "path": "htj2k_bsets_profile0/p0_05_bset/ds0_ht_05_b11.j2k",
+      "availability": "optional",
+      "root_env": "Z2000_PART4_ROOT",
+      "format": "j2k",
+      "decoder": "native",
+      "sha256": "2d98f8a241880ea5bfc1d283dc4856ae6dc05aa6f585fdd6280f4254d9bca69b",
+      "source": {
+        "producer": "ITU-T T.814 | ISO/IEC 15444-15 HTJ2K conformance sets in the T.803 corpus",
+        "version": "WG1 corpus commit f6b9ede094a0bd6e1e0427e12721e3f3ee1b704b",
+        "origin": "Kakadu kdu_transcode of T.803 p0_05 to HT code-blocks, magnitude bound B=11 (p0_05_bset)",
+        "license": "JPEG 2000 standard conformance/testing grant in COPYRIGHT.txt; notice retention required",
+        "redistribution": "optional local asset; not redistributed by z2000"
+      },
+      "oracle": "B-limited transcode (coding passes discarded): within 1 LSB of Kakadu 8.4.1 kdu_expand and Grok 20.4.19 on every component (9/7 arithmetic)",
+      "features": ["ht-block-coder", "siz-subsampled-components", "cod-qcd-component-overrides", "tiles-and-tile-parts", "irreversible-97"],
+      "expectation": "decode_pass",
+      "expected_native_sha256": "b1ce3623117e6d0f7bdf415bbe633915b63a58911dfe9915d28b9ed9773d4bc2"
+    },
+    {
+      "id": "wg1-htj2k-ds0-ht-05-b12",
+      "path": "htj2k_bsets_profile0/p0_05_bset/ds0_ht_05_b12.j2k",
+      "availability": "optional",
+      "root_env": "Z2000_PART4_ROOT",
+      "format": "j2k",
+      "decoder": "native",
+      "sha256": "e936bceff1ee6465b6b1e0c0169cf442f3053d72bbb2c316589c3968a27745a3",
+      "source": {
+        "producer": "ITU-T T.814 | ISO/IEC 15444-15 HTJ2K conformance sets in the T.803 corpus",
+        "version": "WG1 corpus commit f6b9ede094a0bd6e1e0427e12721e3f3ee1b704b",
+        "origin": "Kakadu kdu_transcode of T.803 p0_05 to HT code-blocks, magnitude bound B=12 (p0_05_bset)",
+        "license": "JPEG 2000 standard conformance/testing grant in COPYRIGHT.txt; notice retention required",
+        "redistribution": "optional local asset; not redistributed by z2000"
+      },
+      "oracle": "lossless transcode: native samples identical to z2000's decode of p0_05, checked here against that stream's T.803 references",
+      "features": ["ht-block-coder", "siz-subsampled-components", "cod-qcd-component-overrides", "tiles-and-tile-parts", "irreversible-97"],
+      "expectation": "decode_pass",
+      "references": [{
+        "path": "reference_class0_profile0/c0p0_05.pgx",
+        "sha256": "008e9c31c4409706048d59d3dd9f79c87db0ea8c45eb49d53449c56c8919a2df",
+        "format": "pgx",
+        "component": 0,
+        "resolution_reduction": 3,
+        "max_peak_error": 54,
+        "max_mse": 68
+      }]
+    },
+    {
+      "id": "wg1-htj2k-ds0-hm-06-b11",
+      "path": "htj2k_bsets_profile0/p0_06_bset/ds0_hm_06_b11.j2k",
+      "availability": "optional",
+      "root_env": "Z2000_PART4_ROOT",
+      "format": "j2k",
+      "sha256": "2ed9119d74bab5e413dc3e8d0612189bbc66d2003784d0cffa18f303fcfb2e1b",
+      "source": {
+        "producer": "ITU-T T.814 | ISO/IEC 15444-15 HTJ2K conformance sets in the T.803 corpus",
+        "version": "WG1 corpus commit f6b9ede094a0bd6e1e0427e12721e3f3ee1b704b",
+        "origin": "Kakadu kdu_transcode of T.803 p0_06 to HT code-blocks and HTMIX, magnitude bound B=11 (p0_06_bset)",
+        "license": "JPEG 2000 standard conformance/testing grant in COPYRIGHT.txt; notice retention required",
+        "redistribution": "optional local asset; not redistributed by z2000"
+      },
+      "oracle": "MIXED tile-components (SPcod bits 6 and 7) mix HT and Part 1 code-blocks, which needs per-block coder detection; unsupported, not malformed",
+      "features": ["ht-block-coder", "siz-bounded-unsigned-components", "siz-subsampled-components", "roi-rgn-maxshift"],
       "expectation": "fail_closed",
       "expected_error": "UnsupportedPayload"
+    },
+    {
+      "id": "wg1-htj2k-ds0-hm-06-b18",
+      "path": "htj2k_bsets_profile0/p0_06_bset/ds0_hm_06_b18.j2k",
+      "availability": "optional",
+      "root_env": "Z2000_PART4_ROOT",
+      "format": "j2k",
+      "sha256": "d30ca91bafd02181d8138865414be0a7b58a4e41cb2d091b969a817f0b4abc77",
+      "source": {
+        "producer": "ITU-T T.814 | ISO/IEC 15444-15 HTJ2K conformance sets in the T.803 corpus",
+        "version": "WG1 corpus commit f6b9ede094a0bd6e1e0427e12721e3f3ee1b704b",
+        "origin": "Kakadu kdu_transcode of T.803 p0_06 to HT code-blocks and HTMIX, magnitude bound B=18 (p0_06_bset)",
+        "license": "JPEG 2000 standard conformance/testing grant in COPYRIGHT.txt; notice retention required",
+        "redistribution": "optional local asset; not redistributed by z2000"
+      },
+      "oracle": "MIXED tile-components (SPcod bits 6 and 7) mix HT and Part 1 code-blocks, which needs per-block coder detection; unsupported, not malformed",
+      "features": ["ht-block-coder", "siz-bounded-unsigned-components", "siz-subsampled-components", "roi-rgn-maxshift"],
+      "expectation": "fail_closed",
+      "expected_error": "UnsupportedPayload"
+    },
+    {
+      "id": "wg1-htj2k-ds0-ht-06-b11",
+      "path": "htj2k_bsets_profile0/p0_06_bset/ds0_ht_06_b11.j2k",
+      "availability": "optional",
+      "root_env": "Z2000_PART4_ROOT",
+      "format": "j2k",
+      "decoder": "native",
+      "sha256": "128cdf462ba518eddac97c6ed7ddefab60f09dd4f47e29b7778386471a8b712f",
+      "source": {
+        "producer": "ITU-T T.814 | ISO/IEC 15444-15 HTJ2K conformance sets in the T.803 corpus",
+        "version": "WG1 corpus commit f6b9ede094a0bd6e1e0427e12721e3f3ee1b704b",
+        "origin": "Kakadu kdu_transcode of T.803 p0_06 to HT code-blocks, magnitude bound B=11 (p0_06_bset)",
+        "license": "JPEG 2000 standard conformance/testing grant in COPYRIGHT.txt; notice retention required",
+        "redistribution": "optional local asset; not redistributed by z2000"
+      },
+      "oracle": "B-limited transcode (coding passes discarded): within 1 LSB of Kakadu 8.4.1 and Grok 20.4.19 on components 1-3; component 0 is z2000's p0_06 ROI reconstruction, as for the Part 1 stream",
+      "features": ["ht-block-coder", "siz-bounded-unsigned-components", "siz-subsampled-components", "roi-rgn-maxshift"],
+      "expectation": "decode_pass",
+      "expected_native_sha256": "7527f9cd1dfc7006cbde6d09066e718c6b5556bac49f629732242e43ba56140f"
+    },
+    {
+      "id": "wg1-htj2k-ds0-ht-06-b15",
+      "path": "htj2k_bsets_profile0/p0_06_bset/ds0_ht_06_b15.j2k",
+      "availability": "optional",
+      "root_env": "Z2000_PART4_ROOT",
+      "format": "j2k",
+      "decoder": "native",
+      "sha256": "59572b57a43a61f2f96da4723965362ce16690a615d6b5ce8b4ad4093eaa21d1",
+      "source": {
+        "producer": "ITU-T T.814 | ISO/IEC 15444-15 HTJ2K conformance sets in the T.803 corpus",
+        "version": "WG1 corpus commit f6b9ede094a0bd6e1e0427e12721e3f3ee1b704b",
+        "origin": "Kakadu kdu_transcode of T.803 p0_06 to HT code-blocks, magnitude bound B=15 (p0_06_bset)",
+        "license": "JPEG 2000 standard conformance/testing grant in COPYRIGHT.txt; notice retention required",
+        "redistribution": "optional local asset; not redistributed by z2000"
+      },
+      "oracle": "B-limited transcode (coding passes discarded): within 1 LSB of Kakadu 8.4.1 and Grok 20.4.19 on components 1-3; component 0 is z2000's p0_06 ROI reconstruction, as for the Part 1 stream",
+      "features": ["ht-block-coder", "siz-bounded-unsigned-components", "siz-subsampled-components", "roi-rgn-maxshift"],
+      "expectation": "decode_pass",
+      "expected_native_sha256": "b14ade6832f3793a6cdecc08c689f40b91ef2e914327f2bab7f62d29a8199932"
+    },
+    {
+      "id": "wg1-htj2k-ds0-ht-06-b18",
+      "path": "htj2k_bsets_profile0/p0_06_bset/ds0_ht_06_b18.j2k",
+      "availability": "optional",
+      "root_env": "Z2000_PART4_ROOT",
+      "format": "j2k",
+      "sha256": "c1b768338b6fccba480f4d496dc662255ab19d44d98d0cd182cd543cfe42655b",
+      "source": {
+        "producer": "ITU-T T.814 | ISO/IEC 15444-15 HTJ2K conformance sets in the T.803 corpus",
+        "version": "WG1 corpus commit f6b9ede094a0bd6e1e0427e12721e3f3ee1b704b",
+        "origin": "Kakadu kdu_transcode of T.803 p0_06 to HT code-blocks, magnitude bound B=18 (p0_06_bset)",
+        "license": "JPEG 2000 standard conformance/testing grant in COPYRIGHT.txt; notice retention required",
+        "redistribution": "optional local asset; not redistributed by z2000"
+      },
+      "oracle": "lossless transcode: native samples identical to z2000's decode of p0_06, checked here against that stream's T.803 references",
+      "features": ["ht-block-coder", "siz-bounded-unsigned-components", "siz-subsampled-components", "roi-rgn-maxshift"],
+      "expectation": "decode_pass",
+      "references": [{
+        "path": "reference_class0_profile0/c0p0_06.pgx",
+        "sha256": "2a2c37396620bc14f37c578c74b2894ecfeb5e20bd30dc67fc0e8db4bbfb592b",
+        "format": "pgx",
+        "component": 0,
+        "resolution_reduction": 3,
+        "space": "codestream_components",
+        "sample_shift": 4,
+        "max_peak_error": 109,
+        "max_mse": 743
+      }]
+    },
+    {
+      "id": "wg1-htj2k-ds0-ht-07-b11",
+      "path": "htj2k_bsets_profile0/p0_07_bset/ds0_ht_07_b11.j2k",
+      "availability": "optional",
+      "root_env": "Z2000_PART4_ROOT",
+      "format": "j2k",
+      "decoder": "native",
+      "sha256": "b40bf07e90b27a9e10bdf65c9f727d9baa233648635c76924c81a41fcf5fd4a8",
+      "source": {
+        "producer": "ITU-T T.814 | ISO/IEC 15444-15 HTJ2K conformance sets in the T.803 corpus",
+        "version": "WG1 corpus commit f6b9ede094a0bd6e1e0427e12721e3f3ee1b704b",
+        "origin": "Kakadu kdu_transcode of T.803 p0_07 to HT code-blocks, magnitude bound B=11 (p0_07_bset)",
+        "license": "JPEG 2000 standard conformance/testing grant in COPYRIGHT.txt; notice retention required",
+        "redistribution": "optional local asset; not redistributed by z2000"
+      },
+      "oracle": "B-limited transcode (coding passes discarded): exact on every component against Kakadu 8.4.1 kdu_expand and Grok 20.4.19",
+      "features": ["ht-block-coder", "siz-native-signed-components", "progression-poc", "tiles-and-tile-parts", "reversible-53"],
+      "expectation": "decode_pass",
+      "expected_native_sha256": "ed27b923bfa329016a91a5e9d849208fad56469d93df384ce06779f77e178984"
+    },
+    {
+      "id": "wg1-htj2k-ds0-ht-07-b15",
+      "path": "htj2k_bsets_profile0/p0_07_bset/ds0_ht_07_b15.j2k",
+      "availability": "optional",
+      "root_env": "Z2000_PART4_ROOT",
+      "format": "j2k",
+      "decoder": "native",
+      "sha256": "14da7e15d3c88c636410ab573b9ceb5d46881e99860bc200636602f59c701da2",
+      "source": {
+        "producer": "ITU-T T.814 | ISO/IEC 15444-15 HTJ2K conformance sets in the T.803 corpus",
+        "version": "WG1 corpus commit f6b9ede094a0bd6e1e0427e12721e3f3ee1b704b",
+        "origin": "Kakadu kdu_transcode of T.803 p0_07 to HT code-blocks, magnitude bound B=15 (p0_07_bset)",
+        "license": "JPEG 2000 standard conformance/testing grant in COPYRIGHT.txt; notice retention required",
+        "redistribution": "optional local asset; not redistributed by z2000"
+      },
+      "oracle": "B-limited transcode (coding passes discarded): exact on every component against Kakadu 8.4.1 kdu_expand and Grok 20.4.19",
+      "features": ["ht-block-coder", "siz-native-signed-components", "progression-poc", "tiles-and-tile-parts", "reversible-53"],
+      "expectation": "decode_pass",
+      "expected_native_sha256": "daea7b74a4386f569456674fd01790478bf6c9a400e0f8ba792919ed0f68f1d5"
+    },
+    {
+      "id": "wg1-htj2k-ds0-ht-07-b16",
+      "path": "htj2k_bsets_profile0/p0_07_bset/ds0_ht_07_b16.j2k",
+      "availability": "optional",
+      "root_env": "Z2000_PART4_ROOT",
+      "format": "j2k",
+      "decoder": "native",
+      "sha256": "4e11ab229ab4f7d6fe6d5665aa9e1d94712ad58d7b5b5f29bd8265df8762bdf9",
+      "source": {
+        "producer": "ITU-T T.814 | ISO/IEC 15444-15 HTJ2K conformance sets in the T.803 corpus",
+        "version": "WG1 corpus commit f6b9ede094a0bd6e1e0427e12721e3f3ee1b704b",
+        "origin": "Kakadu kdu_transcode of T.803 p0_07 to HT code-blocks, magnitude bound B=16 (p0_07_bset)",
+        "license": "JPEG 2000 standard conformance/testing grant in COPYRIGHT.txt; notice retention required",
+        "redistribution": "optional local asset; not redistributed by z2000"
+      },
+      "oracle": "lossless transcode: native samples identical to z2000's decode of p0_07, checked here against that stream's T.803 references",
+      "features": ["ht-block-coder", "siz-native-signed-components", "progression-poc", "tiles-and-tile-parts", "reversible-53"],
+      "expectation": "decode_pass",
+      "references": [{
+        "path": "reference_class0_profile0/c0p0_07.pgx",
+        "sha256": "55ee08494d259e5879aa4695d8c9d1afca4f4bb0be65bde61b55c7120d425d38",
+        "format": "pgx",
+        "component": 0,
+        "resolution_reduction": 0,
+        "crop": { "x": 0, "y": 0 },
+        "sample_shift": 4,
+        "max_peak_error": 10,
+        "max_mse": 0.34
+      }]
+    },
+    {
+      "id": "wg1-htj2k-ds0-ht-08-b11",
+      "path": "htj2k_bsets_profile0/p0_08_bset/ds0_ht_08_b11.j2k",
+      "availability": "optional",
+      "root_env": "Z2000_PART4_ROOT",
+      "format": "j2k",
+      "decoder": "native",
+      "sha256": "e3261e51c8357e92ba8c8a9f7ed6239bb476f8b3d7c01f7ead31fc562f31abb5",
+      "source": {
+        "producer": "ITU-T T.814 | ISO/IEC 15444-15 HTJ2K conformance sets in the T.803 corpus",
+        "version": "WG1 corpus commit f6b9ede094a0bd6e1e0427e12721e3f3ee1b704b",
+        "origin": "Kakadu kdu_transcode of T.803 p0_08 to HT code-blocks, magnitude bound B=11 (p0_08_bset)",
+        "license": "JPEG 2000 standard conformance/testing grant in COPYRIGHT.txt; notice retention required",
+        "redistribution": "optional local asset; not redistributed by z2000"
+      },
+      "oracle": "B-limited transcode (coding passes discarded): exact on every component against Kakadu 8.4.1 kdu_expand and Grok 20.4.19",
+      "features": ["ht-block-coder", "siz-native-signed-components", "cod-qcd-component-overrides", "progression-poc", "reversible-53"],
+      "expectation": "decode_pass",
+      "expected_native_sha256": "60940b3a69c89d2316c21bf9ecf08a578e0c5b88db51c4fd5b34bb4a4ca367f4"
+    },
+    {
+      "id": "wg1-htj2k-ds0-ht-08-b15",
+      "path": "htj2k_bsets_profile0/p0_08_bset/ds0_ht_08_b15.j2k",
+      "availability": "optional",
+      "root_env": "Z2000_PART4_ROOT",
+      "format": "j2k",
+      "decoder": "native",
+      "sha256": "79aac2e8e85d699b6cc7ba8639d95496c0e3386c64ab58f27bd31ac593bb9680",
+      "source": {
+        "producer": "ITU-T T.814 | ISO/IEC 15444-15 HTJ2K conformance sets in the T.803 corpus",
+        "version": "WG1 corpus commit f6b9ede094a0bd6e1e0427e12721e3f3ee1b704b",
+        "origin": "Kakadu kdu_transcode of T.803 p0_08 to HT code-blocks, magnitude bound B=15 (p0_08_bset)",
+        "license": "JPEG 2000 standard conformance/testing grant in COPYRIGHT.txt; notice retention required",
+        "redistribution": "optional local asset; not redistributed by z2000"
+      },
+      "oracle": "B-limited transcode (coding passes discarded): exact on every component against Kakadu 8.4.1 kdu_expand and Grok 20.4.19",
+      "features": ["ht-block-coder", "siz-native-signed-components", "cod-qcd-component-overrides", "progression-poc", "reversible-53"],
+      "expectation": "decode_pass",
+      "expected_native_sha256": "2756e6d53694099ac6a8479744dff791e6685e842a5f0c55dfe7b662d21680c9"
+    },
+    {
+      "id": "wg1-htj2k-ds0-ht-08-b16",
+      "path": "htj2k_bsets_profile0/p0_08_bset/ds0_ht_08_b16.j2k",
+      "availability": "optional",
+      "root_env": "Z2000_PART4_ROOT",
+      "format": "j2k",
+      "decoder": "native",
+      "sha256": "da8a5f8e1f99ff0e4092d9017c39dcda01079c5b2b94448a1016421ee5bd4462",
+      "source": {
+        "producer": "ITU-T T.814 | ISO/IEC 15444-15 HTJ2K conformance sets in the T.803 corpus",
+        "version": "WG1 corpus commit f6b9ede094a0bd6e1e0427e12721e3f3ee1b704b",
+        "origin": "Kakadu kdu_transcode of T.803 p0_08 to HT code-blocks, magnitude bound B=16 (p0_08_bset)",
+        "license": "JPEG 2000 standard conformance/testing grant in COPYRIGHT.txt; notice retention required",
+        "redistribution": "optional local asset; not redistributed by z2000"
+      },
+      "oracle": "lossless transcode: native samples identical to z2000's decode of p0_08, checked here against that stream's T.803 references",
+      "features": ["ht-block-coder", "siz-native-signed-components", "cod-qcd-component-overrides", "progression-poc", "reversible-53"],
+      "expectation": "decode_pass",
+      "references": [{
+        "path": "reference_class0_profile0/c0p0_08.pgx",
+        "sha256": "ad58ffadc846fc3ce72d1280ef3f2300c3697bfa754c6eb292167f9f835716a6",
+        "format": "pgx",
+        "component": 0,
+        "resolution_reduction": 5,
+        "sample_shift": 4,
+        "max_peak_error": 7,
+        "max_mse": 6.72
+      }]
+    },
+    {
+      "id": "wg1-htj2k-ds0-ht-09-b11",
+      "path": "htj2k_bsets_profile0/p0_09_bset/ds0_ht_09_b11.j2k",
+      "availability": "optional",
+      "root_env": "Z2000_PART4_ROOT",
+      "format": "j2k",
+      "sha256": "1837d4e37327c4170191852e06ef42a78ccfa82d529f1f6f50faeab409805653",
+      "source": {
+        "producer": "ITU-T T.814 | ISO/IEC 15444-15 HTJ2K conformance sets in the T.803 corpus",
+        "version": "WG1 corpus commit f6b9ede094a0bd6e1e0427e12721e3f3ee1b704b",
+        "origin": "Kakadu kdu_transcode of T.803 p0_09 to HT code-blocks, magnitude bound B=11 (p0_09_bset)",
+        "license": "JPEG 2000 standard conformance/testing grant in COPYRIGHT.txt; notice retention required",
+        "redistribution": "optional local asset; not redistributed by z2000"
+      },
+      "oracle": "lossless transcode: native samples identical to z2000's decode of p0_09, checked here against that stream's T.803 references",
+      "features": ["ht-block-coder", "irreversible-97"],
+      "expectation": "decode_pass",
+      "references": [{
+        "path": "reference_class0_profile0/c0p0_09.pgx",
+        "sha256": "ce4dcf09fbd8076527f8d3ea83d9a6c23e24c8aa50f74ac7cd943695f59c875a",
+        "format": "pgx",
+        "component": 0,
+        "resolution_reduction": 2,
+        "max_peak_error": 4,
+        "max_mse": 1.47
+      }]
+    },
+    {
+      "id": "wg1-htj2k-ds0-ht-10-b11",
+      "path": "htj2k_bsets_profile0/p0_10_bset/ds0_ht_10_b11.j2k",
+      "availability": "optional",
+      "root_env": "Z2000_PART4_ROOT",
+      "format": "j2k",
+      "sha256": "022679c600ed171a14bb0050f43f59b2543fa48befccc78b977d552918ebbe84",
+      "source": {
+        "producer": "ITU-T T.814 | ISO/IEC 15444-15 HTJ2K conformance sets in the T.803 corpus",
+        "version": "WG1 corpus commit f6b9ede094a0bd6e1e0427e12721e3f3ee1b704b",
+        "origin": "Kakadu kdu_transcode of T.803 p0_10 to HT code-blocks, magnitude bound B=11 (p0_10_bset)",
+        "license": "JPEG 2000 standard conformance/testing grant in COPYRIGHT.txt; notice retention required",
+        "redistribution": "optional local asset; not redistributed by z2000"
+      },
+      "oracle": "lossless transcode: native samples identical to z2000's decode of p0_10, checked here against that stream's T.803 references",
+      "features": ["ht-block-coder", "siz-subsampled-components", "tiles-and-tile-parts", "reversible-53"],
+      "expectation": "decode_pass",
+      "references": [{
+        "path": "reference_class0_profile0/c0p0_10.pgx",
+        "sha256": "c58b9eb2901a78519af6eec0946a38a9ebb01bc9bb429fb3ea7cc4fc7e9a0bfb",
+        "format": "pgx",
+        "component": 0,
+        "resolution_reduction": 0,
+        "space": "codestream_components",
+        "max_peak_error": 10,
+        "max_mse": 2.84
+      }]
+    },
+    {
+      "id": "wg1-htj2k-ds0-ht-11-b10",
+      "path": "htj2k_bsets_profile0/p0_11_bset/ds0_ht_11_b10.j2k",
+      "availability": "optional",
+      "root_env": "Z2000_PART4_ROOT",
+      "format": "j2k",
+      "sha256": "3a497d436c4a90afe810948e9df9fc1f24adf7e0dbc08d40d121260f4358b31c",
+      "source": {
+        "producer": "ITU-T T.814 | ISO/IEC 15444-15 HTJ2K conformance sets in the T.803 corpus",
+        "version": "WG1 corpus commit f6b9ede094a0bd6e1e0427e12721e3f3ee1b704b",
+        "origin": "Kakadu kdu_transcode of T.803 p0_11 to HT code-blocks, magnitude bound B=10 (p0_11_bset)",
+        "license": "JPEG 2000 standard conformance/testing grant in COPYRIGHT.txt; notice retention required",
+        "redistribution": "optional local asset; not redistributed by z2000"
+      },
+      "oracle": "lossless transcode: native samples identical to z2000's decode of p0_11, checked here against that stream's T.803 references",
+      "features": ["ht-block-coder", "packet-header-placement", "reversible-53"],
+      "expectation": "decode_pass",
+      "references": [{
+        "path": "reference_class0_profile0/c0p0_11.pgx",
+        "sha256": "4a4457e31466d9a78d332fea16237da57cd4b2f3d4fa6dee0074fa568b282765",
+        "format": "pgx",
+        "component": 0,
+        "resolution_reduction": 0,
+        "max_peak_error": 0,
+        "max_mse": 0
+      }]
+    },
+    {
+      "id": "wg1-htj2k-ds0-ht-12-b11",
+      "path": "htj2k_bsets_profile0/p0_12_bset/ds0_ht_12_b11.j2k",
+      "availability": "optional",
+      "root_env": "Z2000_PART4_ROOT",
+      "format": "j2k",
+      "sha256": "4941137592aa48e41552c4b3bf66ef35f2f4ca915a4ca4a9fe296eabaae8aaf7",
+      "source": {
+        "producer": "ITU-T T.814 | ISO/IEC 15444-15 HTJ2K conformance sets in the T.803 corpus",
+        "version": "WG1 corpus commit f6b9ede094a0bd6e1e0427e12721e3f3ee1b704b",
+        "origin": "Kakadu kdu_transcode of T.803 p0_12 to HT code-blocks, magnitude bound B=11 (p0_12_bset)",
+        "license": "JPEG 2000 standard conformance/testing grant in COPYRIGHT.txt; notice retention required",
+        "redistribution": "optional local asset; not redistributed by z2000"
+      },
+      "oracle": "lossless transcode: native samples identical to z2000's decode of p0_12, checked here against that stream's T.803 references",
+      "features": ["ht-block-coder", "reversible-53"],
+      "expectation": "decode_pass",
+      "references": [{
+        "path": "reference_class0_profile0/c0p0_12.pgx",
+        "sha256": "1e4d1b5de30bba4e7360f755c4d4ea395e2be446901ae2d3005f8f8fd4cf1817",
+        "format": "pgx",
+        "resolution_reduction": 0,
+        "max_peak_error": 0,
+        "max_mse": 0
+      }]
+    },
+    {
+      "id": "wg1-htj2k-ds0-ht-13-b11",
+      "path": "htj2k_bsets_profile0/p0_13_bset/ds0_ht_13_b11.j2k",
+      "availability": "optional",
+      "root_env": "Z2000_PART4_ROOT",
+      "format": "j2k",
+      "decoder": "native",
+      "sha256": "43493c63d3d4affc13337d26fec4eddb7d023bd68f268d182d51013db6c51c0d",
+      "source": {
+        "producer": "ITU-T T.814 | ISO/IEC 15444-15 HTJ2K conformance sets in the T.803 corpus",
+        "version": "WG1 corpus commit f6b9ede094a0bd6e1e0427e12721e3f3ee1b704b",
+        "origin": "Kakadu kdu_transcode of T.803 p0_13 to HT code-blocks, magnitude bound B=11 (p0_13_bset)",
+        "license": "JPEG 2000 standard conformance/testing grant in COPYRIGHT.txt; notice retention required",
+        "redistribution": "optional local asset; not redistributed by z2000"
+      },
+      "oracle": "lossless transcode: native samples identical to z2000's decode of p0_13, checked here against that stream's T.803 references",
+      "features": ["ht-block-coder", "siz-bounded-unsigned-components", "cod-qcd-component-overrides", "progression-poc", "roi-rgn-maxshift"],
+      "expectation": "decode_pass",
+      "references": [
+        {
+          "path": "reference_class1_profile0/c1p0_13-0.pgx",
+          "sha256": "a3250795aa7c31d0caf0a9ad706e21652060768b404210624e5dd695787dbc07",
+          "format": "pgx",
+          "component": 0,
+          "resolution_reduction": 0,
+          "max_peak_error": 0,
+          "max_mse": 0
+        },
+        {
+          "path": "reference_class1_profile0/c1p0_13-1.pgx",
+          "sha256": "ff079e7fe2ca5fd542f6b85bda838fa9f11428a59d7584f6523cb649cb8b79c7",
+          "format": "pgx",
+          "component": 1,
+          "resolution_reduction": 0,
+          "max_peak_error": 0,
+          "max_mse": 0
+        },
+        {
+          "path": "reference_class1_profile0/c1p0_13-2.pgx",
+          "sha256": "83d2079dcfaee85fcd75e8a23d6dd69686b966ba334d2c8ca9a25b2bbc7079b0",
+          "format": "pgx",
+          "component": 2,
+          "resolution_reduction": 0,
+          "max_peak_error": 0,
+          "max_mse": 0
+        },
+        {
+          "path": "reference_class1_profile0/c1p0_13-3.pgx",
+          "sha256": "d1bb447c46cf81b0673ff570eb5d5f940aeebd8e6fee68f21e061c6d5cb064ae",
+          "format": "pgx",
+          "component": 3,
+          "resolution_reduction": 0,
+          "max_peak_error": 0,
+          "max_mse": 0
+        }
+      ]
+    },
+    {
+      "id": "wg1-htj2k-ds0-ht-14-b11",
+      "path": "htj2k_bsets_profile0/p0_14_bset/ds0_ht_14_b11.j2k",
+      "availability": "optional",
+      "root_env": "Z2000_PART4_ROOT",
+      "format": "j2k",
+      "sha256": "c3b1071873a3c4f03d63a186afde7bdaf87be6f9e5750f74ddebd4f863d11ada",
+      "source": {
+        "producer": "ITU-T T.814 | ISO/IEC 15444-15 HTJ2K conformance sets in the T.803 corpus",
+        "version": "WG1 corpus commit f6b9ede094a0bd6e1e0427e12721e3f3ee1b704b",
+        "origin": "Kakadu kdu_transcode of T.803 p0_14 to HT code-blocks, magnitude bound B=11 (p0_14_bset)",
+        "license": "JPEG 2000 standard conformance/testing grant in COPYRIGHT.txt; notice retention required",
+        "redistribution": "optional local asset; not redistributed by z2000"
+      },
+      "oracle": "lossless transcode: native samples identical to z2000's decode of p0_14, checked here against that stream's T.803 references",
+      "features": ["ht-block-coder", "reversible-53"],
+      "expectation": "decode_pass",
+      "references": [{
+        "path": "reference_class0_profile0/c0p0_14.pgx",
+        "sha256": "c556ab741f9b7d0a519830d9d609fd68366d7af200a9c2dd740e18218ced8fba",
+        "format": "pgx",
+        "component": 0,
+        "resolution_reduction": 2,
+        "space": "codestream_components",
+        "max_peak_error": 0,
+        "max_mse": 0
+      }]
+    },
+    {
+      "id": "wg1-htj2k-ds0-hm-15-b8",
+      "path": "htj2k_bsets_profile0/p0_15_bset/ds0_hm_15_b8.j2k",
+      "availability": "optional",
+      "root_env": "Z2000_PART4_ROOT",
+      "format": "j2k",
+      "decoder": "native",
+      "sha256": "94378d2c73f1c12c719b6fb53ec66e43e3f6564b49c81de2a13abd5527fa185a",
+      "source": {
+        "producer": "ITU-T T.814 | ISO/IEC 15444-15 HTJ2K conformance sets in the T.803 corpus",
+        "version": "WG1 corpus commit f6b9ede094a0bd6e1e0427e12721e3f3ee1b704b",
+        "origin": "Kakadu kdu_transcode of T.803 p0_15 to HT code-blocks and HTMIX, magnitude bound B=8 (p0_15_bset)",
+        "license": "JPEG 2000 standard conformance/testing grant in COPYRIGHT.txt; notice retention required",
+        "redistribution": "optional local asset; not redistributed by z2000"
+      },
+      "oracle": "MIXED tile-components (SPcod bits 6 and 7) mix HT and Part 1 code-blocks, which needs per-block coder detection; unsupported, not malformed",
+      "features": ["ht-block-coder", "siz-native-signed-components", "cod-qcd-component-overrides", "progression-poc", "roi-rgn-maxshift"],
+      "expectation": "fail_closed",
+      "expected_error": "UnsupportedPayload"
+    },
+    {
+      "id": "wg1-htj2k-ds0-ht-15-b11",
+      "path": "htj2k_bsets_profile0/p0_15_bset/ds0_ht_15_b11.j2k",
+      "availability": "optional",
+      "root_env": "Z2000_PART4_ROOT",
+      "format": "j2k",
+      "decoder": "native",
+      "sha256": "f19f9deb2007f305d6361319f04506e9c9b02cd1c166d3f18c7a10893e085cb8",
+      "source": {
+        "producer": "ITU-T T.814 | ISO/IEC 15444-15 HTJ2K conformance sets in the T.803 corpus",
+        "version": "WG1 corpus commit f6b9ede094a0bd6e1e0427e12721e3f3ee1b704b",
+        "origin": "Kakadu kdu_transcode of T.803 p0_15 to HT code-blocks, magnitude bound B=11 (p0_15_bset)",
+        "license": "JPEG 2000 standard conformance/testing grant in COPYRIGHT.txt; notice retention required",
+        "redistribution": "optional local asset; not redistributed by z2000"
+      },
+      "oracle": "B-limited transcode (coding passes discarded): exact on every component against Kakadu 8.4.1 kdu_expand and Grok 20.4.19",
+      "features": ["ht-block-coder", "siz-native-signed-components", "cod-qcd-component-overrides", "progression-poc", "roi-rgn-maxshift"],
+      "expectation": "decode_pass",
+      "expected_native_sha256": "aefc1386adc3c641b0d7caa4fa8faa42e3474f17438345b89a8da11a675670a6"
+    },
+    {
+      "id": "wg1-htj2k-ds0-ht-15-b14",
+      "path": "htj2k_bsets_profile0/p0_15_bset/ds0_ht_15_b14.j2k",
+      "availability": "optional",
+      "root_env": "Z2000_PART4_ROOT",
+      "format": "j2k",
+      "decoder": "native",
+      "sha256": "2be3ab7e49eeb941eab1368a1b1594665506bb1e4266b30a4a0cc41b0aaf5bd5",
+      "source": {
+        "producer": "ITU-T T.814 | ISO/IEC 15444-15 HTJ2K conformance sets in the T.803 corpus",
+        "version": "WG1 corpus commit f6b9ede094a0bd6e1e0427e12721e3f3ee1b704b",
+        "origin": "Kakadu kdu_transcode of T.803 p0_15 to HT code-blocks, magnitude bound B=14 (p0_15_bset)",
+        "license": "JPEG 2000 standard conformance/testing grant in COPYRIGHT.txt; notice retention required",
+        "redistribution": "optional local asset; not redistributed by z2000"
+      },
+      "oracle": "lossless transcode: native samples identical to z2000's decode of p0_15, checked here against that stream's T.803 references",
+      "features": ["ht-block-coder", "siz-native-signed-components", "cod-qcd-component-overrides", "progression-poc", "roi-rgn-maxshift"],
+      "expectation": "decode_pass",
+      "references": [
+        {
+          "path": "reference_class0_profile0/c0p0_15r0.pgx",
+          "sha256": "12e00c98f9ad94527542d99c0763955614352ece12f22afa8e418c77fdcb9d35",
+          "format": "pgx",
+          "component": 0,
+          "resolution_reduction": 0,
+          "crop": { "x": 0, "y": 0 },
+          "max_peak_error": 0,
+          "max_mse": 0
+        },
+        {
+          "path": "reference_class0_profile0/c0p0_15r1.pgx",
+          "sha256": "b95be5fbc4272595678af5955805ea073decb7bbb4e60708eaf41853c5c1311a",
+          "format": "pgx",
+          "component": 0,
+          "resolution_reduction": 1,
+          "max_peak_error": 0,
+          "max_mse": 0
+        }
+      ]
+    },
+    {
+      "id": "wg1-htj2k-ds0-ht-16-b11",
+      "path": "htj2k_bsets_profile0/p0_16_bset/ds0_ht_16_b11.j2k",
+      "availability": "optional",
+      "root_env": "Z2000_PART4_ROOT",
+      "format": "j2k",
+      "sha256": "890e0ba09bbcdf3b7f6647f4cf9c55c69532171bd013d96f93aecce3a370e108",
+      "source": {
+        "producer": "ITU-T T.814 | ISO/IEC 15444-15 HTJ2K conformance sets in the T.803 corpus",
+        "version": "WG1 corpus commit f6b9ede094a0bd6e1e0427e12721e3f3ee1b704b",
+        "origin": "Kakadu kdu_transcode of T.803 p0_16 to HT code-blocks, magnitude bound B=11 (p0_16_bset)",
+        "license": "JPEG 2000 standard conformance/testing grant in COPYRIGHT.txt; notice retention required",
+        "redistribution": "optional local asset; not redistributed by z2000"
+      },
+      "oracle": "lossless transcode: native samples identical to z2000's decode of p0_16, checked here against that stream's T.803 references",
+      "features": ["ht-block-coder", "packet-header-placement", "reversible-53"],
+      "expectation": "decode_pass",
+      "references": [{
+        "path": "reference_class0_profile0/c0p0_16.pgx",
+        "sha256": "48876e9905a149b70299072d8f148bf697589c6c5aa15b328af8566bb4daecf5",
+        "format": "pgx",
+        "resolution_reduction": 0,
+        "max_peak_error": 0,
+        "max_mse": 0
+      }]
+    },
+    {
+      "id": "wg1-htj2k-ds1-ht-01-b11",
+      "path": "htj2k_bsets_profile1/p1_01_bset/ds1_ht_01_b11.j2k",
+      "availability": "optional",
+      "root_env": "Z2000_PART4_ROOT",
+      "format": "j2k",
+      "decoder": "native",
+      "sha256": "a8a83d911023df792e942b9d8fa8501d4e5853fb31b7c5f9392ebd4a246bfb4a",
+      "source": {
+        "producer": "ITU-T T.814 | ISO/IEC 15444-15 HTJ2K conformance sets in the T.803 corpus",
+        "version": "WG1 corpus commit f6b9ede094a0bd6e1e0427e12721e3f3ee1b704b",
+        "origin": "Kakadu kdu_transcode of T.803 p1_01 to HT code-blocks, magnitude bound B=11 (p1_01_bset)",
+        "license": "JPEG 2000 standard conformance/testing grant in COPYRIGHT.txt; notice retention required",
+        "redistribution": "optional local asset; not redistributed by z2000"
+      },
+      "oracle": "B-limited transcode (coding passes discarded): exact on every component against Kakadu 8.4.1 kdu_expand and Grok 20.4.19",
+      "features": ["ht-block-coder", "siz-bounded-unsigned-components", "reversible-53"],
+      "expectation": "decode_pass",
+      "expected_native_sha256": "5afbce542250ae87531b235abedb41301ebe73dd4b26a1499f4e32d85a860e6e"
+    },
+    {
+      "id": "wg1-htj2k-ds1-ht-01-b12",
+      "path": "htj2k_bsets_profile1/p1_01_bset/ds1_ht_01_b12.j2k",
+      "availability": "optional",
+      "root_env": "Z2000_PART4_ROOT",
+      "format": "j2k",
+      "decoder": "native",
+      "sha256": "f0b23e38fc93e17edf078e3eac0fef82b81d4894448d536c703ec7588d33965f",
+      "source": {
+        "producer": "ITU-T T.814 | ISO/IEC 15444-15 HTJ2K conformance sets in the T.803 corpus",
+        "version": "WG1 corpus commit f6b9ede094a0bd6e1e0427e12721e3f3ee1b704b",
+        "origin": "Kakadu kdu_transcode of T.803 p1_01 to HT code-blocks, magnitude bound B=12 (p1_01_bset)",
+        "license": "JPEG 2000 standard conformance/testing grant in COPYRIGHT.txt; notice retention required",
+        "redistribution": "optional local asset; not redistributed by z2000"
+      },
+      "oracle": "lossless transcode: native samples identical to z2000's decode of p1_01, checked here against that stream's T.803 references",
+      "features": ["ht-block-coder", "siz-bounded-unsigned-components", "reversible-53"],
+      "expectation": "decode_pass",
+      "references": [{
+        "path": "reference_class1_profile1/c1p1_01-0.pgx",
+        "sha256": "fd1730adccecdfa90c31e895ea58083670ccedbe6fe053b20c3bb7c7cf8fb96b",
+        "format": "pgx",
+        "component": 0,
+        "resolution_reduction": 0,
+        "max_peak_error": 0,
+        "max_mse": 0
+      }]
+    },
+    {
+      "id": "wg1-htj2k-ds1-ht-02-b11",
+      "path": "htj2k_bsets_profile1/p1_02_bset/ds1_ht_02_b11.j2k",
+      "availability": "optional",
+      "root_env": "Z2000_PART4_ROOT",
+      "format": "j2k",
+      "decoder": "native",
+      "sha256": "3b172b912ef33af283b2bbd7438fed53ed8d25c7999471c2405d29043db62c15",
+      "source": {
+        "producer": "ITU-T T.814 | ISO/IEC 15444-15 HTJ2K conformance sets in the T.803 corpus",
+        "version": "WG1 corpus commit f6b9ede094a0bd6e1e0427e12721e3f3ee1b704b",
+        "origin": "Kakadu kdu_transcode of T.803 p1_02 to HT code-blocks, magnitude bound B=11 (p1_02_bset)",
+        "license": "JPEG 2000 standard conformance/testing grant in COPYRIGHT.txt; notice retention required",
+        "redistribution": "optional local asset; not redistributed by z2000"
+      },
+      "oracle": "B-limited transcode (coding passes discarded): within 1 LSB of Kakadu 8.4.1 kdu_expand and Grok 20.4.19 on every component (9/7 arithmetic)",
+      "features": ["ht-block-coder", "packet-header-placement", "cod-qcd-component-overrides", "irreversible-97"],
+      "expectation": "decode_pass",
+      "expected_native_sha256": "9a84d7aaacb1bf4a3b8fdc20494cf34b965d417a8a1541127213d617b6b1aad4"
+    },
+    {
+      "id": "wg1-htj2k-ds1-ht-02-b12",
+      "path": "htj2k_bsets_profile1/p1_02_bset/ds1_ht_02_b12.j2k",
+      "availability": "optional",
+      "root_env": "Z2000_PART4_ROOT",
+      "format": "j2k",
+      "decoder": "interleaved_rgb",
+      "sha256": "281224ca009d514766a06b357928185361d19b2c68b6fbcdc496c7c52a142ce0",
+      "source": {
+        "producer": "ITU-T T.814 | ISO/IEC 15444-15 HTJ2K conformance sets in the T.803 corpus",
+        "version": "WG1 corpus commit f6b9ede094a0bd6e1e0427e12721e3f3ee1b704b",
+        "origin": "Kakadu kdu_transcode of T.803 p1_02 to HT code-blocks, magnitude bound B=12 (p1_02_bset)",
+        "license": "JPEG 2000 standard conformance/testing grant in COPYRIGHT.txt; notice retention required",
+        "redistribution": "optional local asset; not redistributed by z2000"
+      },
+      "oracle": "lossless transcode: native samples identical to z2000's decode of p1_02, checked here against that stream's T.803 references",
+      "features": ["ht-block-coder", "packet-header-placement", "cod-qcd-component-overrides", "irreversible-97"],
+      "expectation": "decode_pass",
+      "references": [
+        {
+          "path": "reference_class1_profile1/c1p1_02-0.pgx",
+          "sha256": "0ed11a110b40f1f7174546decf075a12ba201e1d5bbba18dcfa638d6b320bc3f",
+          "format": "pgx",
+          "component": 0,
+          "resolution_reduction": 0,
+          "max_peak_error": 2,
+          "max_mse": 0.4
+        },
+        {
+          "path": "reference_class1_profile1/c1p1_02-1.pgx",
+          "sha256": "23551bc04b229de63344f7a7f4b0cc19d8512681ad3fbd5d7b3fbd55d23228dc",
+          "format": "pgx",
+          "component": 1,
+          "resolution_reduction": 0,
+          "max_peak_error": 2,
+          "max_mse": 0.4
+        },
+        {
+          "path": "reference_class1_profile1/c1p1_02-2.pgx",
+          "sha256": "46349e1ccb1df738b58ce7d0f706bd6c2937eb6457596e9ec9f858ed0d9b47a4",
+          "format": "pgx",
+          "component": 2,
+          "resolution_reduction": 0,
+          "max_peak_error": 2,
+          "max_mse": 0.4
+        }
+      ]
+    },
+    {
+      "id": "wg1-htj2k-ds1-ht-03-b11",
+      "path": "htj2k_bsets_profile1/p1_03_bset/ds1_ht_03_b11.j2k",
+      "availability": "optional",
+      "root_env": "Z2000_PART4_ROOT",
+      "format": "j2k",
+      "decoder": "native",
+      "sha256": "947f2bca24ab3c17e5a0c39b000f2f0b51cc00079f717ebb1ae5051035840165",
+      "source": {
+        "producer": "ITU-T T.814 | ISO/IEC 15444-15 HTJ2K conformance sets in the T.803 corpus",
+        "version": "WG1 corpus commit f6b9ede094a0bd6e1e0427e12721e3f3ee1b704b",
+        "origin": "Kakadu kdu_transcode of T.803 p1_03 to HT code-blocks, magnitude bound B=11 (p1_03_bset)",
+        "license": "JPEG 2000 standard conformance/testing grant in COPYRIGHT.txt; notice retention required",
+        "redistribution": "optional local asset; not redistributed by z2000"
+      },
+      "oracle": "B-limited transcode (coding passes discarded): within 1 LSB of Kakadu 8.4.1 kdu_expand and Grok 20.4.19 on every component (9/7 arithmetic)",
+      "features": ["ht-block-coder", "siz-subsampled-components", "irreversible-97"],
+      "expectation": "decode_pass",
+      "expected_native_sha256": "eeb48f936ad0a1ba295d3c4841255a38c9cc04f867127f254ced8f8cc4beec79"
+    },
+    {
+      "id": "wg1-htj2k-ds1-ht-03-b12",
+      "path": "htj2k_bsets_profile1/p1_03_bset/ds1_ht_03_b12.j2k",
+      "availability": "optional",
+      "root_env": "Z2000_PART4_ROOT",
+      "format": "j2k",
+      "decoder": "native",
+      "sha256": "b0016d76aaa288fa2450f4d26a21c5403eb4d742eee4fc6633056eeb4eb715eb",
+      "source": {
+        "producer": "ITU-T T.814 | ISO/IEC 15444-15 HTJ2K conformance sets in the T.803 corpus",
+        "version": "WG1 corpus commit f6b9ede094a0bd6e1e0427e12721e3f3ee1b704b",
+        "origin": "Kakadu kdu_transcode of T.803 p1_03 to HT code-blocks, magnitude bound B=12 (p1_03_bset)",
+        "license": "JPEG 2000 standard conformance/testing grant in COPYRIGHT.txt; notice retention required",
+        "redistribution": "optional local asset; not redistributed by z2000"
+      },
+      "oracle": "lossless transcode: native samples identical to z2000's decode of p1_03, checked here against that stream's T.803 references",
+      "features": ["ht-block-coder", "siz-subsampled-components", "irreversible-97"],
+      "expectation": "decode_pass",
+      "references": [
+        {
+          "path": "reference_class1_profile1/c1p1_03-0.pgx",
+          "sha256": "416ff6c9b3d917ff20d3bd6405e224049137d04ed80dec9f8f42dfa070deb794",
+          "format": "pgx",
+          "component": 0,
+          "resolution_reduction": 0,
+          "max_peak_error": 1,
+          "max_mse": 0.25
+        },
+        {
+          "path": "reference_class1_profile1/c1p1_03-1.pgx",
+          "sha256": "9cfbc8ebb61d6447cc4fc98d8cca63016a288037a4609b7424685fd72a984ca1",
+          "format": "pgx",
+          "component": 1,
+          "resolution_reduction": 0,
+          "max_peak_error": 1,
+          "max_mse": 0.25
+        },
+        {
+          "path": "reference_class1_profile1/c1p1_03-2.pgx",
+          "sha256": "71fd301fb0da107998a8805a46faff754c14316d1544e4159778b43055b210a5",
+          "format": "pgx",
+          "component": 2,
+          "resolution_reduction": 0,
+          "max_peak_error": 1,
+          "max_mse": 0.25
+        },
+        {
+          "path": "reference_class1_profile1/c1p1_03-3.pgx",
+          "sha256": "1d52fc3949c1110036d7f478f378a11bc7d91a2d02743d6c5eccde72e345cc6f",
+          "format": "pgx",
+          "component": 3,
+          "resolution_reduction": 0,
+          "max_peak_error": 0,
+          "max_mse": 0
+        }
+      ]
+    },
+    {
+      "id": "wg1-htj2k-ds1-ht-04-b9",
+      "path": "htj2k_bsets_profile1/p1_04_bset/ds1_ht_04_b9.j2k",
+      "availability": "optional",
+      "root_env": "Z2000_PART4_ROOT",
+      "format": "j2k",
+      "decoder": "native",
+      "sha256": "0e578dd62a2d8ca0136a0fd2532701fc72be599843ae8465b4dda293752947f2",
+      "source": {
+        "producer": "ITU-T T.814 | ISO/IEC 15444-15 HTJ2K conformance sets in the T.803 corpus",
+        "version": "WG1 corpus commit f6b9ede094a0bd6e1e0427e12721e3f3ee1b704b",
+        "origin": "Kakadu kdu_transcode of T.803 p1_04 to HT code-blocks, magnitude bound B=9 (p1_04_bset)",
+        "license": "JPEG 2000 standard conformance/testing grant in COPYRIGHT.txt; notice retention required",
+        "redistribution": "optional local asset; not redistributed by z2000"
+      },
+      "oracle": "lossless transcode: native samples identical to z2000's decode of p1_04, checked here against that stream's T.803 references",
+      "features": ["ht-block-coder", "tiles-and-tile-parts", "cod-qcd-component-overrides", "irreversible-97"],
+      "expectation": "decode_pass",
+      "references": [
+        {
+          "path": "reference_class0_profile1/c0p1_04r0.pgx",
+          "sha256": "b393a2f5de9966f3b6908721751e69b0e60e7938cd713226a884210f9caf00f0",
+          "format": "pgx",
+          "component": 0,
+          "resolution_reduction": 0,
+          "crop": { "x": 0, "y": 0 },
+          "sample_shift": 4,
+          "max_peak_error": 1,
+          "max_mse": 0.01
+        },
+        {
+          "path": "reference_class0_profile1/c0p1_04r3.pgx",
+          "sha256": "caddf11fa88f7ca8bc80ad11188203e69496d1437f7edb3930370b862cfd5489",
+          "format": "pgx",
+          "component": 0,
+          "resolution_reduction": 3,
+          "sample_shift": 4,
+          "max_peak_error": 0,
+          "max_mse": 0
+        }
+      ]
+    },
+    {
+      "id": "wg1-htj2k-ds1-ht-05-b11",
+      "path": "htj2k_bsets_profile1/p1_05_bset/ds1_ht_05_b11.j2k",
+      "availability": "optional",
+      "root_env": "Z2000_PART4_ROOT",
+      "format": "j2k",
+      "decoder": "interleaved_rgb",
+      "sha256": "8d29b7d88fd8542d120b120d7edcbe150d05f66a3db7f33a0b07aa524196813a",
+      "source": {
+        "producer": "ITU-T T.814 | ISO/IEC 15444-15 HTJ2K conformance sets in the T.803 corpus",
+        "version": "WG1 corpus commit f6b9ede094a0bd6e1e0427e12721e3f3ee1b704b",
+        "origin": "Kakadu kdu_transcode of T.803 p1_05 to HT code-blocks, magnitude bound B=11 (p1_05_bset)",
+        "license": "JPEG 2000 standard conformance/testing grant in COPYRIGHT.txt; notice retention required",
+        "redistribution": "optional local asset; not redistributed by z2000"
+      },
+      "oracle": "lossless transcode: native samples identical to z2000's decode of p1_05, checked here against that stream's T.803 references",
+      "features": ["ht-block-coder", "progression-poc", "tiles-and-tile-parts", "packet-header-placement", "irreversible-97"],
+      "expectation": "decode_pass",
+      "references": [
+        {
+          "path": "reference_class1_profile1/c1p1_05-0.pgx",
+          "sha256": "e60798e11ca7af7fba5af5805f0cdb0682d903f698b4f4fc3f2bceab56331ad0",
+          "format": "pgx",
+          "component": 0,
+          "resolution_reduction": 0,
+          "max_peak_error": 11,
+          "max_mse": 0.65
+        },
+        {
+          "path": "reference_class1_profile1/c1p1_05-1.pgx",
+          "sha256": "c9858b293f37c4c831cec4c7fc21cae83493b6f60995ddd8cfe67e5f7c85c1c1",
+          "format": "pgx",
+          "component": 1,
+          "resolution_reduction": 0,
+          "max_peak_error": 7,
+          "max_mse": 0.75
+        },
+        {
+          "path": "reference_class1_profile1/c1p1_05-2.pgx",
+          "sha256": "c9279428c9c879a590fe70e991ddc76ab41a9441b43c349020a1b8582fb2671a",
+          "format": "pgx",
+          "component": 2,
+          "resolution_reduction": 0,
+          "max_peak_error": 15,
+          "max_mse": 0.85
+        }
+      ]
+    },
+    {
+      "id": "wg1-htj2k-ds1-ht-06-b11",
+      "path": "htj2k_bsets_profile1/p1_06_bset/ds1_ht_06_b11.j2k",
+      "availability": "optional",
+      "root_env": "Z2000_PART4_ROOT",
+      "format": "j2k",
+      "decoder": "interleaved_rgb",
+      "sha256": "7d80ccf6fe9d100437003a68b152c814bf392207f1fe23ebd8dc59923bcf15f8",
+      "source": {
+        "producer": "ITU-T T.814 | ISO/IEC 15444-15 HTJ2K conformance sets in the T.803 corpus",
+        "version": "WG1 corpus commit f6b9ede094a0bd6e1e0427e12721e3f3ee1b704b",
+        "origin": "Kakadu kdu_transcode of T.803 p1_06 to HT code-blocks, magnitude bound B=11 (p1_06_bset)",
+        "license": "JPEG 2000 standard conformance/testing grant in COPYRIGHT.txt; notice retention required",
+        "redistribution": "optional local asset; not redistributed by z2000"
+      },
+      "oracle": "lossless transcode: native samples identical to z2000's decode of p1_06, checked here against that stream's T.803 references",
+      "features": ["ht-block-coder", "irreversible-97"],
+      "expectation": "decode_pass",
+      "references": [
+        {
+          "path": "reference_class1_profile1/c1p1_06-0.pgx",
+          "sha256": "5f1fea232444c1afa6f1e06738a64910436d122f2fe69b0bf5ea59a55ac7f66e",
+          "format": "pgx",
+          "component": 0,
+          "resolution_reduction": 0,
+          "max_peak_error": 1,
+          "max_mse": 0.1
+        },
+        {
+          "path": "reference_class1_profile1/c1p1_06-1.pgx",
+          "sha256": "52acc2a2c4374dcdcdf4b795c430fef1e632e5fc35590401c7c0a618935f6749",
+          "format": "pgx",
+          "component": 1,
+          "resolution_reduction": 0,
+          "max_peak_error": 1,
+          "max_mse": 0.1
+        },
+        {
+          "path": "reference_class1_profile1/c1p1_06-2.pgx",
+          "sha256": "01cb2817388ee05f1f4524b0420f86580e62e098ac17680f18ec53cf7f470fc0",
+          "format": "pgx",
+          "component": 2,
+          "resolution_reduction": 0,
+          "max_peak_error": 1,
+          "max_mse": 0.1
+        }
+      ]
+    },
+    {
+      "id": "wg1-htj2k-ds1-ht-07-b11",
+      "path": "htj2k_bsets_profile1/p1_07_bset/ds1_ht_07_b11.j2k",
+      "availability": "optional",
+      "root_env": "Z2000_PART4_ROOT",
+      "format": "j2k",
+      "decoder": "native",
+      "sha256": "15f0309d27a22a65c3b5068e7ebd6443b4f95bb41777d70819342cf01ad4b19d",
+      "source": {
+        "producer": "ITU-T T.814 | ISO/IEC 15444-15 HTJ2K conformance sets in the T.803 corpus",
+        "version": "WG1 corpus commit f6b9ede094a0bd6e1e0427e12721e3f3ee1b704b",
+        "origin": "Kakadu kdu_transcode of T.803 p1_07 to HT code-blocks, magnitude bound B=11 (p1_07_bset)",
+        "license": "JPEG 2000 standard conformance/testing grant in COPYRIGHT.txt; notice retention required",
+        "redistribution": "optional local asset; not redistributed by z2000"
+      },
+      "oracle": "lossless transcode: native samples identical to z2000's decode of p1_07, checked here against that stream's T.803 references",
+      "features": ["ht-block-coder", "siz-subsampled-components", "cod-qcd-component-overrides", "reversible-53"],
+      "expectation": "decode_pass",
+      "references": [
+        {
+          "path": "reference_class1_profile1/c1p1_07-0.pgx",
+          "sha256": "ee0f0dd90be110241c60dbed84e03c94ff4f83d5cbdae603db9182f24cf5f8a4",
+          "format": "pgx",
+          "component": 0,
+          "resolution_reduction": 0,
+          "max_peak_error": 0,
+          "max_mse": 0
+        },
+        {
+          "path": "reference_class1_profile1/c1p1_07-1.pgx",
+          "sha256": "b72f60a12ec7dcb1360cc9adfd86bfb2e81d929262df5e0167d00c02e61b4df4",
+          "format": "pgx",
+          "component": 1,
+          "resolution_reduction": 0,
+          "max_peak_error": 0,
+          "max_mse": 0
+        }
+      ]
     }
   ]
 }

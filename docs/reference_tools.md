@@ -322,6 +322,26 @@ here so they are not rediscovered as new.
   tile-parts decodes. Kakadu's `ORGgen_tlm=N` caps tile-parts *per tile* at N
   and aborts when padding would exceed it.
 
+### HTJ2K (2026-10-28)
+
+- **Kakadu 8.4.1 does not truncate HT code-blocks by layer.** On a
+  `kdu_transcode` of a three-layer Part 1 stream, where every block's first
+  two layers hold only placeholder passes, `kdu_expand -layers 1` returns
+  the full lossless image; Grok 20.4.19 and z2000 return mid-grey (no HT
+  set yet) and agree sample for sample at every layer count. Use Grok for
+  layer-limited HT oracles.
+- **OpenJPEG 2.5.4 fails on most multi-layer HT transcodes** in the WG1 HT
+  sets (`failed to decode image` on `ds0_ht_04/05/06` and `ds1_ht_02/03`),
+  apparently because it expects a block's first contribution to hold the
+  cleanup pass, as OpenJPH does.
+- **Grok 20.4.19 misdecodes the five-component JPH `file10`** (components 0
+  to 2 off by up to 255), which Kakadu and z2000 decode exactly as its
+  published `reference_jph` images (`file10_b12`).
+- On `ds0_ht_06_*` component 0, Kakadu and Grok differ from z2000 by up to
+  570, as on the Part 1 `p0_06` the stream was transcoded from: a Maxshift
+  ROI with truncated background reconstructs differently, and all three are
+  outside the class-1 reference by over 350.
+
 ## Methodological Cautions
 
 - **Fuzz the fixtures, not just the profiles.** `tools/fuzz_fixtures.py`

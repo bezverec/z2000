@@ -446,6 +446,12 @@ pub fn readCodingPassCount(reader: *PacketHeaderReader) !u16 {
 
 pub const SegmentLengthState = struct {
     lblock: u8 = 3,
+    /// HT code-blocks (ITU-T T.814 Annex B) split their contributions into
+    /// codeword segments around HT sets instead of Part 1 passes.
+    high_throughput: bool = false,
+    /// HT only: the index of the block's first HT cleanup pass once a
+    /// packet has carried it; the passes before it are placeholder passes.
+    ht_cleanup_pass: ?u16 = null,
 
     pub fn write(
         self: *SegmentLengthState,
@@ -674,6 +680,8 @@ pub const DecodedPacketBlock = struct {
     /// terminated segments; segment_count == 0 means one continuous segment.
     segment_count: u8 = 0,
     segment_lengths: [max_block_segments]u64 = @splat(0),
+    /// HT only: the block's first HT cleanup pass, if it has been included.
+    ht_cleanup_pass: ?u16 = null,
 };
 
 pub const LayerTruncation = struct {
@@ -1672,6 +1680,18 @@ pub fn readCodeBlockPacketHeader(
         0;
     const pass_count = try readCodingPassCount(reader);
 
+    if (length_state.high_throughput) {
+        var block = DecodedPacketBlock{
+            .included = true,
+            .first_inclusion = first_inclusion,
+            .zero_bitplanes = zeros,
+            .pass_count = pass_count,
+            .byte_length = 0,
+        };
+        try readHighThroughputLengths(reader, length_state, first_pass, &block);
+        return block;
+    }
+
     if (bypass or terminate_all) {
         var span_passes: [max_block_segments]u16 = undefined;
         const segment_count = if (terminate_all) blk: {
@@ -1705,6 +1725,85 @@ pub fn readCodeBlockPacketHeader(
         .pass_count = pass_count,
         .byte_length = byte_length,
     };
+}
+
+/// Whether an HT code-block's codeword segment ends after `pass`, given its
+/// first HT cleanup pass: the HT segments end at the cleanup pass of each
+/// HT set and at its MagRef pass, the set T of ITU-T T.814 B.2.
+pub fn htSegmentEndsAfterPass(cleanup_pass: u16, pass: u16) bool {
+    if (pass < cleanup_pass) return false;
+    return (pass - cleanup_pass) % 3 != 1;
+}
+
+/// The codeword segment lengths of one HT contribution of `block.pass_count`
+/// passes starting at `first_pass` (ITU-T T.814 B.3). A codeword segment
+/// ends at an HT segment boundary or at the contribution's last pass.
+///
+/// Until a packet carries the block's first HT cleanup pass, the passes are
+/// placeholder passes whose number the decoder cannot know in advance. The
+/// cleanup pass can only be the contribution's last pass index that is a
+/// multiple of 3, with at most its SigProp and MagRef passes after it, so
+/// that segment's length is read first: non-zero means the cleanup pass is
+/// here, and zero that every pass of the contribution is a placeholder, in
+/// one codeword segment whose wider length field must then be zero too.
+pub fn readHighThroughputLengths(
+    reader: *PacketHeaderReader,
+    length_state: *SegmentLengthState,
+    first_pass: u16,
+    block: *DecodedPacketBlock,
+) !void {
+    const pass_count = block.pass_count;
+    const end_pass = std.math.add(u16, first_pass, pass_count) catch return PacketHeaderError.InvalidPacketHeader;
+    while (try reader.readBit()) {
+        if (length_state.lblock == 63) return PacketHeaderError.InvalidPacketHeader;
+        length_state.lblock += 1;
+    }
+    if (length_state.ht_cleanup_pass == null) {
+        const refinement_passes = (end_pass - 1) % 3;
+        if (refinement_passes < pass_count) {
+            const cleanup_passes = pass_count - refinement_passes;
+            const length = try reader.readBits(try length_state.lengthBitCount(try passCountLengthBits(cleanup_passes)));
+            if (length != 0) {
+                // The first HT cleanup segment has at least two bytes, and
+                // every earlier codeword segment of it was empty.
+                if (length < 2) return PacketHeaderError.InvalidPacketHeader;
+                length_state.ht_cleanup_pass = first_pass + cleanup_passes - 1;
+                block.segment_lengths[0] = length;
+                block.segment_count = 1;
+                if (refinement_passes != 0) {
+                    block.segment_lengths[1] = try reader.readBits(try length_state.lengthBitCount(try passCountLengthBits(refinement_passes)));
+                    block.segment_count = 2;
+                }
+            } else {
+                const extra_bits = try passCountLengthBits(pass_count) - try passCountLengthBits(cleanup_passes);
+                if (try reader.readBits(extra_bits) != 0) return PacketHeaderError.InvalidPacketHeader;
+                block.segment_count = 1;
+            }
+        } else {
+            if (try reader.readBits(try length_state.lengthBitCount(try passCountLengthBits(pass_count))) != 0) {
+                return PacketHeaderError.InvalidPacketHeader;
+            }
+            block.segment_count = 1;
+        }
+    } else {
+        const cleanup_pass = length_state.ht_cleanup_pass.?;
+        var segment_start = first_pass;
+        var pass = first_pass;
+        while (pass < end_pass) : (pass += 1) {
+            if (!htSegmentEndsAfterPass(cleanup_pass, pass) and pass + 1 != end_pass) continue;
+            if (block.segment_count >= max_block_segments) return PacketHeaderError.InvalidPacketHeader;
+            const passes = pass + 1 - segment_start;
+            block.segment_lengths[block.segment_count] = try reader.readBits(try length_state.lengthBitCount(try passCountLengthBits(passes)));
+            block.segment_count += 1;
+            segment_start = pass + 1;
+        }
+    }
+    var total: u64 = 0;
+    for (block.segment_lengths[0..block.segment_count]) |length| {
+        total = std.math.add(u64, total, length) catch return PacketHeaderError.InvalidPacketHeader;
+    }
+    block.byte_length = total;
+    block.ht_cleanup_pass = length_state.ht_cleanup_pass;
 }
 
 pub fn readPrecinctPacketHeader(

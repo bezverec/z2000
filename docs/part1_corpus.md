@@ -63,6 +63,24 @@ fail-closed cases, zero mismatches, and zero skips; without it, 104 passes,
 19 expected fail-closed cases, and 23 skips. The paragraphs below record how each stream was promoted; the
 history up to 2026-07-26, when ten passed, comes first.
 
+Since 2026-10-28 (`main`, the 0.3.0 line) the manifest also holds the
+same checkout's 40 HTJ2K codestreams (`htj2k_bsets_profile0/1`, Kakadu
+`kdu_transcode` outputs of the T.803 streams at several magnitude bounds B)
+and three committed Kakadu HT fixtures, 189 entries in all: 167 decode
+passes, 22 expected fail-closed cases, and no mismatch with the optional
+root; 107 passes, 19 fail-closed cases, and 63 skips without it. The 23
+lossless transcodes reuse their originals' T.803 references, since z2000
+decodes each exactly as it decodes the original. The 14 B-limited ones,
+which drop coding passes, are pinned by native hashes, checked when they
+were added against Kakadu 8.4.1 and Grok 20.4.19: exact on the 5/3 streams,
+one LSB on the 9/7 ones, except `ds0_ht_06` component 0, where both
+references differ from z2000 by up to 570 exactly as they do on `p0_06`
+itself (an ROI reconstruction of truncated background; all three are far
+from the class-1 reference, z2000 least). The three MIXED `ds0_hm` streams
+are expected `UnsupportedPayload`. The JPH files of `testfiles_jph` are not
+entries yet: the JPH container is the next step (`roadmap.md`, section 6),
+though their codestreams already decode exactly as Kakadu decodes them.
+
 `p0_01`, `p0_02`, `p0_03`, `p0_11`, `p0_12`, `p0_16`, `p0_04`, `p0_09`,
 `p0_10`, and `p0_14` were the first to pass their declared references. `p0_03` is exact both for the published upper-left 128x128 crop of
 the 256x256 full output and for the complete 128x128 reduction-1 output. It

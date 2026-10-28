@@ -15,6 +15,10 @@ about 65% (+/- 8 points) in [the roadmap](docs/roadmap.md) as of 2026-10-24.
 All 16 official T.803 profile-0 conformance streams and all 7 profile-1
 streams decode against their references ([Part 1 corpus](docs/part1_corpus.md)).
 Neither figure nor that result is a formal ISO conformance certification.
+On `main` (the 0.3.0 line, not yet released) raw HTJ2K (Part 15)
+codestreams decode as well, including the 37 non-MIXED WG1 HT conformance
+streams; JPH files and HT encoding come next ([roadmap](docs/roadmap.md),
+section 6).
 
 The current prerelease is [`v0.2.0-rc.7`](https://github.com/bezverec/z2000/releases/tag/v0.2.0-rc.7),
 with binaries for Windows x86-64, Linux x86-64, and Linux RISC-V 64. It has no

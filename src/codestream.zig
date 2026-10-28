@@ -12,6 +12,7 @@ const plm = @import("plm.zig");
 const poc = @import("poc.zig");
 const ppm = @import("ppm.zig");
 const profile_signaling = @import("profile_signaling.zig");
+const ht = @import("ht.zig");
 const rate_alloc = @import("rate_alloc.zig");
 const subband = @import("subband.zig");
 const t2 = @import("t2.zig");
@@ -3860,6 +3861,9 @@ pub const StrictPacketBlock = struct {
     /// largest possible size in every block made the catalog about 1 KB a
     /// block.
     segment_lengths: []const u64 = &.{},
+    /// HT code-blocks: the first HT cleanup pass, after `3 P0` placeholder
+    /// passes; null while only placeholder passes were included.
+    ht_cleanup_pass: ?u16 = null,
 };
 
 pub const StrictPacketBlockCatalog = struct {
@@ -4183,9 +4187,11 @@ const StrictRpclBlockAssembly = struct {
     /// chunked walk's run arena): most blocks have one, and a table of the
     /// largest possible size made every block about 1 KB.
     segment_lengths: std.ArrayList(u64) = .empty,
-    /// BYPASS only: the last recorded length is a partial codeword segment that
-    /// a later quality layer continues.
+    /// BYPASS and HT: the last recorded length is a partial codeword segment
+    /// that a later quality layer continues.
     open_segment: bool = false,
+    /// HT only: the block's first HT cleanup pass, once included.
+    ht_cleanup_pass: ?u16 = null,
 
     fn appendSegmentLengths(self: *StrictRpclBlockAssembly, decoded: t2.DecodedPacketBlock, allocator: std.mem.Allocator) !void {
         // ISO B.10.7: a packet signals one length per terminated codeword
@@ -4196,8 +4202,15 @@ const StrictRpclBlockAssembly = struct {
         // folded back into one length per terminated segment here -- which is
         // what T1 consumes. Every other style terminates on boundaries the
         // packet structure already respects.
+        if (self.code_block_style.high_throughput) {
+            // HT segments (T.814 B.3) span the placeholder passes and the
+            // cleanup pass, then the SigProp and MagRef passes of each HT
+            // set, across quality layers like BYPASS segments.
+            self.ht_cleanup_pass = decoded.ht_cleanup_pass;
+            return self.appendSpanningSegmentLengths(decoded, allocator);
+        }
         if (self.code_block_style.bypass and !self.code_block_style.terminate_all) {
-            return self.appendBypassSegmentLengths(decoded, allocator);
+            return self.appendSpanningSegmentLengths(decoded, allocator);
         }
         var index: u8 = 0;
         while (index < decoded.segment_count) : (index += 1) {
@@ -4206,7 +4219,15 @@ const StrictRpclBlockAssembly = struct {
         }
     }
 
-    fn appendBypassSegmentLengths(self: *StrictRpclBlockAssembly, decoded: t2.DecodedPacketBlock, allocator: std.mem.Allocator) !void {
+    fn segmentEndsAfterPass(self: *const StrictRpclBlockAssembly, pass: u16) bool {
+        if (self.code_block_style.high_throughput) {
+            const cleanup_pass = self.ht_cleanup_pass orelse return false;
+            return t2.htSegmentEndsAfterPass(cleanup_pass, pass);
+        }
+        return ebcot.bypassSegmentEndsAfterPass(pass);
+    }
+
+    fn appendSpanningSegmentLengths(self: *StrictRpclBlockAssembly, decoded: t2.DecodedPacketBlock, allocator: std.mem.Allocator) !void {
         if (decoded.pass_count == 0) {
             if (decoded.segment_count != 0) return CodestreamError.InvalidCodestream;
             return;
@@ -4219,11 +4240,11 @@ const StrictRpclBlockAssembly = struct {
         var terminations: u8 = 0;
         var pass = first_pass;
         while (pass <= last_pass) : (pass += 1) {
-            if (ebcot.bypassSegmentEndsAfterPass(pass)) {
+            if (self.segmentEndsAfterPass(pass)) {
                 terminations = std.math.add(u8, terminations, 1) catch return CodestreamError.InvalidCodestream;
             }
         }
-        const closes_last = ebcot.bypassSegmentEndsAfterPass(last_pass);
+        const closes_last = self.segmentEndsAfterPass(last_pass);
         const expected_pieces: u8 = if (closes_last) terminations else terminations + 1;
         if (decoded.segment_count != expected_pieces) return CodestreamError.InvalidCodestream;
 
@@ -8865,11 +8886,7 @@ fn readStrictCodestreamMetadataForProfile(
     if (!saw_siz or !saw_cod or !saw_qcd or width == 0 or height == 0 or layers == 0) {
         return CodestreamError.InvalidCodestream;
     }
-    if (try profile_state.?.finishHighThroughput()) |_| {
-        // The HTJ2K signalling is valid as far as the main header goes; the
-        // HT block decoder is not implemented yet.
-        return CodestreamError.UnsupportedPayload;
-    }
+    const high_throughput = try profile_state.?.finishHighThroughput();
     var all_components_have_qcc = true;
     for (qcc_component_seen[0..component_count]) |seen| {
         all_components_have_qcc = all_components_have_qcc and seen;
@@ -9255,6 +9272,7 @@ fn readStrictCodestreamMetadataForProfile(
             if (ppm_headers) |headers| headers else null,
             tile_poc_records,
             tile_coding_overrides,
+            high_throughput,
         );
         defer spans.deinit(allocator);
         var total_packets: u64 = 0;
@@ -9416,6 +9434,7 @@ fn readStrictCodestreamMetadataForProfile(
             .transform = parsed_transform,
             .quantization = parsed_quantization,
             .code_block_style = parsed_code_block_style,
+            .high_throughput = high_throughput,
             .block_width = block_width,
             .block_height = block_height,
             .tile_width = grid.params.xtsiz,
@@ -9514,6 +9533,7 @@ fn readStrictCodestreamMetadataForProfile(
         .transform = parsed_transform,
         .quantization = parsed_quantization,
         .code_block_style = parsed_code_block_style,
+        .high_throughput = high_throughput,
         .block_width = block_width,
         .block_height = block_height,
         .tile_origin_x = grid.params.xtosiz,
@@ -9680,8 +9700,8 @@ test "strict main-header profile signaling validates CAP PRF and Rsiz" {
     );
 
     // Part 15 (HTJ2K): a CAP with Ccap15, an optional CPF, and HT bits in
-    // the COD style byte, checked against each other (T.814 Annex A). Valid
-    // signalling stays unsupported until the HT block decoder exists.
+    // the COD style byte, checked against each other (T.814 Annex A). A
+    // null expectation is a header that parses.
     const HtCase = struct {
         rsiz: u16 = profile_signaling.rsiz_cap_present,
         ccap15: u16,
@@ -9689,15 +9709,15 @@ test "strict main-header profile signaling validates CAP PRF and Rsiz" {
         rgn_shift: ?u8 = null,
         style: u8,
         transform: u8 = @backingInt(WaveletTransform.reversible_5_3),
-        expected: CodestreamError,
+        expected: ?CodestreamError,
     };
     const ht_cases = [_]HtCase{
         // HTONLY with HT code-blocks, as the WG1 HT conformance streams.
-        .{ .ccap15 = 0x0003, .style = 0x40, .expected = CodestreamError.UnsupportedPayload },
-        .{ .ccap15 = 0x0003, .cpf = false, .style = 0x48, .expected = CodestreamError.UnsupportedPayload },
+        .{ .ccap15 = 0x0003, .style = 0x40, .expected = null },
+        .{ .ccap15 = 0x0003, .cpf = false, .style = 0x48, .expected = null },
         // HTONLY declares no Part 1 tile-component; HTDECLARED does.
         .{ .ccap15 = 0x0003, .style = 0x00, .expected = CodestreamError.InvalidCodestream },
-        .{ .ccap15 = 0x8003, .style = 0x00, .expected = CodestreamError.UnsupportedPayload },
+        .{ .ccap15 = 0x8003, .style = 0x00, .expected = null },
         // HTDECLARED forbids, and MIXED allows, mixing coders in one
         // tile-component, which is not decoded yet.
         .{ .ccap15 = 0x8003, .style = 0xc0, .expected = CodestreamError.InvalidCodestream },
@@ -9707,11 +9727,10 @@ test "strict main-header profile signaling validates CAP PRF and Rsiz" {
         .{ .ccap15 = 0x4003, .style = 0x40, .expected = CodestreamError.UnsupportedPayload },
         // HTREV forbids HT code-blocks after the 9/7; HTIRV allows them.
         .{ .ccap15 = 0x0003, .style = 0x40, .transform = @backingInt(WaveletTransform.irreversible_9_7), .expected = CodestreamError.InvalidCodestream },
-        .{ .ccap15 = 0x0023, .style = 0x40, .transform = @backingInt(WaveletTransform.irreversible_9_7), .expected = CodestreamError.UnsupportedPayload },
         // RGN only when Ccap15 bit 12 allows it, with SPrgn at most 37.
         .{ .ccap15 = 0x0003, .rgn_shift = 5, .style = 0x40, .expected = CodestreamError.InvalidCodestream },
         .{ .ccap15 = 0x1003, .rgn_shift = 38, .style = 0x40, .expected = CodestreamError.InvalidCodestream },
-        .{ .ccap15 = 0x1003, .rgn_shift = 37, .style = 0x40, .expected = CodestreamError.UnsupportedPayload },
+        .{ .ccap15 = 0x1003, .rgn_shift = 37, .style = 0x40, .expected = null },
         // Bit 6 is reserved in Part 1, and so is CPF.
         .{ .rsiz = 0, .ccap15 = 0, .cpf = false, .style = 0x40, .expected = CodestreamError.InvalidCodestream },
         .{ .rsiz = 0, .ccap15 = 0, .style = 0x00, .expected = CodestreamError.InvalidCodestream },
@@ -9731,8 +9750,18 @@ test "strict main-header profile signaling validates CAP PRF and Rsiz" {
         try std.testing.expectEqual(@as(u16, @backingInt(Marker.cod)), readU16Be(stream, cod));
         stream[cod + 12] = case.style;
         stream[cod + 13] = case.transform;
-        try std.testing.expectError(case.expected, readStrictCodestreamMetadata(allocator, stream));
+        if (case.expected) |expected| {
+            try std.testing.expectError(expected, readStrictCodestreamMetadata(allocator, stream));
+        } else {
+            var header = try readStrictCodestreamMetadata(allocator, stream);
+            header.deinit();
+        }
     }
+    // HTIRV (Ccap15 bit 5) admits HT code-blocks after the 9/7.
+    const irreversible = @backingInt(WaveletTransform.irreversible_9_7);
+    const style = try parseCodeBlockStyleByte(0x48, irreversible, .{ .ccap15 = 0x0023 });
+    try std.testing.expect(style.high_throughput and style.vertical_causal);
+    try std.testing.expectError(CodestreamError.InvalidCodestream, parseCodeBlockStyleByte(0x40, irreversible, .{ .ccap15 = 0x0003 }));
 }
 
 const StrictRgnInfo = struct {
@@ -12294,6 +12323,7 @@ const StrictCatalogFillJob = struct {
                 .payload_offset = source_payload_offset,
                 .payload_length = payload_length,
                 .payload_retained = source.payload_retained,
+                .ht_cleanup_pass = source.ht_cleanup_pass,
             };
             if (source.segment_lengths.items.len != 0) {
                 const count = source.segment_lengths.items.len;
@@ -12549,6 +12579,7 @@ fn buildStrictPacketAuditBandGroup(
     errdefer reader_state.deinit();
     reader_state.bypass = code_block_style.bypass;
     reader_state.terminate_all = code_block_style.terminate_all;
+    for (reader_state.states) |*state| state.length_state.high_throughput = code_block_style.high_throughput;
     const decoded = try allocator.alloc(t2.DecodedPacketBlock, leaf_count);
     errdefer allocator.free(decoded);
 
@@ -14448,6 +14479,7 @@ fn readStrictMultiTileContext(
         if (main_header.ppm_headers) |headers| headers else null,
         tile_poc_records,
         tile_coding_overrides,
+        header.high_throughput,
     );
     errdefer {
         var owned_spans = spans;
@@ -16442,6 +16474,8 @@ fn strictBlockDecodeWorker(job: anytype) void {
     const worker_start = if (job.profile_worker) monotonicNs() else 0;
     var scratch = ebcot.DecodeBlockScratchFor(Coefficient).init(std.heap.smp_allocator);
     defer scratch.deinit();
+    var ht_decoder = ht.Decoder(Coefficient).init(std.heap.smp_allocator);
+    defer ht_decoder.deinit();
     defer if (job.profile_worker) {
         job.worker_stats.ns = elapsedNs(worker_start);
     };
@@ -16502,6 +16536,17 @@ fn strictBlockDecodeWorker(job: anytype) void {
         if (job.profile_worker) {
             job.worker_stats.blocks += 1;
             job.worker_stats.payload_bytes += @intCast(payload.len);
+        }
+        if (block.code_block_style.high_throughput) {
+            const decoded = decodeStrictHighThroughputBlock(Coefficient, &ht_decoder, block, payload) catch |err| {
+                job.result = err;
+                return;
+            };
+            scatterStrictDecodedBlockUnchecked(target.plane, target.width, target.height, block.rect, decoded) catch |err| {
+                job.result = err;
+                return;
+            };
+            continue;
         }
         if (block.code_block_style.bypass) {
             if (job.options.t1_backend != .iso_mq) {
@@ -16953,6 +16998,8 @@ fn decodeStrictComponentBlocksSerial(
     // of per-block allocations.
     var scratch = ebcot.DecodeBlockScratchFor(Coefficient).init(allocator);
     defer scratch.deinit();
+    var ht_decoder = ht.Decoder(Coefficient).init(allocator);
+    defer ht_decoder.deinit();
 
     for (blocks, 0..) |block, block_index| {
         if (block.rect.width == 0 or block.rect.height == 0) return CodestreamError.InvalidCodestream;
@@ -16980,6 +17027,11 @@ fn decodeStrictComponentBlocksSerial(
         if (!block.payload_retained) return CodestreamError.InvalidCodestream;
         const payload = catalog.blockPayload(component, block_index);
         if (payload.len != block.payload_length) return CodestreamError.InvalidCodestream;
+        if (block.code_block_style.high_throughput) {
+            const decoded = try decodeStrictHighThroughputBlock(Coefficient, &ht_decoder, block, payload);
+            try scatterStrictDecodedBlockUnchecked(plane, width, height, block.rect, decoded);
+            continue;
+        }
         if (block.code_block_style.bypass) {
             if (options.t1_backend != .iso_mq) return CodestreamError.UnsupportedPayload;
             const decoded = try ebcot.decodeCodeBlockPayloadBypassIsoMqScratchWithStyleProfiledBorrowed(
@@ -17046,6 +17098,57 @@ fn decodeStrictComponentBlocksSerial(
             },
         }
     }
+}
+
+/// Decode an HT code-block (ITU-T T.814 clause 7) from its catalog entry:
+/// its HT cleanup segment and, with SigProp or MagRef passes, its HT
+/// refinement segment (Annex B). The view stays valid until the decoder's
+/// next block.
+fn decodeStrictHighThroughputBlock(
+    comptime Coefficient: type,
+    decoder: *ht.Decoder(Coefficient),
+    block: StrictPacketBlock,
+    payload: []const u8,
+) ![]const Coefficient {
+    if (block.nominal_bitplanes > ht.Decoder(Coefficient).max_bitplanes) return CodestreamError.UnsupportedPayload;
+    var request = ht.Block{
+        .width = block.rect.width,
+        .height = block.rect.height,
+        .cleanup = &.{},
+        .passes = 0,
+        .cleanup_plane = 0,
+        .magnitude_bitplanes = block.nominal_bitplanes,
+        .vertical_causal = block.code_block_style.vertical_causal,
+    };
+    if (block.ht_cleanup_pass) |cleanup_pass| {
+        if (block.cumulative_passes <= cleanup_pass) return CodestreamError.InvalidCodestream;
+        const ht_passes = block.cumulative_passes - cleanup_pass;
+        // More passes are further HT sets, which only MULTIHT codestreams
+        // have.
+        if (ht_passes > 3) return CodestreamError.UnsupportedPayload;
+        const lengths = block.segment_lengths;
+        if (lengths.len != @as(usize, if (ht_passes > 1) 2 else 1)) return CodestreamError.InvalidCodestream;
+        const cleanup_length = lengths[0];
+        const refinement_length = if (lengths.len > 1) lengths[1] else 0;
+        if (cleanup_length + refinement_length != payload.len) return CodestreamError.InvalidCodestream;
+        // S_blk = P + P0 skipped bit-planes put the cleanup pass's least
+        // significant bit at plane M_b - 1 - S_blk = K - 1 - P0, with K the
+        // block's encoded bit-planes.
+        const placeholder_sets = cleanup_pass / 3;
+        if (block.encoded_bitplanes <= placeholder_sets) return CodestreamError.InvalidCodestream;
+        request.cleanup_plane = @intCast(block.encoded_bitplanes - 1 - placeholder_sets);
+        request.cleanup = payload[0..@intCast(cleanup_length)];
+        request.refinement = payload[@intCast(cleanup_length)..];
+        // Z_blk counts the passes past a lone non-empty cleanup segment.
+        request.passes = if (refinement_length == 0) 1 else @intCast(ht_passes);
+    } else if (payload.len != 0) {
+        // Only placeholder passes, which carry no bytes: no HT set yet.
+        return CodestreamError.InvalidCodestream;
+    }
+    return decoder.decode(request) catch |err| switch (err) {
+        error.InvalidBlock => CodestreamError.InvalidCodestream,
+        error.OutOfMemory => error.OutOfMemory,
+    };
 }
 
 /// ISO/IEC 15444-1 E.3.3 Maxshift reconstruction. Coefficients whose
@@ -17867,7 +17970,7 @@ fn decodeStrictBlockCoefficients(
     };
     const complete_block = pass_count == expected.passes.len;
     _ = layer_count;
-    if (actual.code_block_style.bypass) return CodestreamError.UnsupportedPayload;
+    if (actual.code_block_style.bypass or actual.code_block_style.high_throughput) return CodestreamError.UnsupportedPayload;
     if (complete_block and !actual.code_block_style.terminate_all) {
         return switch (options.t1_backend) {
             .legacy_mq => ebcot.decodeCodeBlockPayloadContinuousInferredWithStyle(
@@ -19642,6 +19745,7 @@ fn readStrictMultiTileTilePartSpans(
     ppm_headers: ?ppm.PackedHeaders,
     tile_poc_records: []std.ArrayList(poc.Record),
     tile_coding_overrides: ?[]StrictTileCodingOverride,
+    high_throughput: ?profile_signaling.HighThroughput,
 ) !std.ArrayList(StrictMultiTileTilePartSpan) {
     const tile_count = grid.tileCount();
     if (tile_count > std.math.maxInt(u16)) return CodestreamError.UnsupportedPayload;
@@ -19770,6 +19874,7 @@ fn readStrictMultiTileTilePartSpans(
             .mct = mct,
             .transform = transform,
             .component_count = component_count,
+            .high_throughput = high_throughput,
         } else null;
         const tile_records_before = tile_poc_records[tile_index].items.len;
         const sod = try readTilePartHeaderMarkers(
@@ -20813,6 +20918,8 @@ const TemporaryHeader = struct {
     transform: WaveletTransform = .reversible_5_3,
     quantization: QuantizationStyle = .none,
     code_block_style: ebcot.CodeBlockStyle = .{},
+    /// The Part 15 (HTJ2K) declaration of a strict codestream's CAP.
+    high_throughput: ?profile_signaling.HighThroughput = null,
     block_width: u16,
     block_height: u16,
     /// SIZ tile dimensions; 0 means image-sized (single tile). Multi-tile
@@ -21665,6 +21772,7 @@ fn readTilePartHeaderMarkers(
             if (coding_target) |target| {
                 if (!target.allowed) return CodestreamError.InvalidCodestream;
                 const rgn = try parseStrictRgnSegment(segment, target.component_count);
+                try checkHighThroughputRgn(target.high_throughput, rgn.shift);
                 const component_override = try strictTileComponentOverride(allocator, target.override, rgn.component);
                 if (component_override.saw_rgn) return CodestreamError.InvalidCodestream;
                 component_override.saw_rgn = true;
@@ -25756,8 +25864,8 @@ fn codeBlockStyle(options: LosslessOptions) u8 {
 /// T.814 A.3.4 and A.5: an HTJ2K codestream has RGN marker segments only
 /// when Ccap15 bit 12 allows them, each with SPrgn at most 37.
 fn checkHighThroughputRgn(high_throughput: ?profile_signaling.HighThroughput, shift: u8) !void {
-    const ht = high_throughput orelse return;
-    if (!ht.regions() or shift > 37) return CodestreamError.InvalidCodestream;
+    const declared = high_throughput orelse return;
+    if (!declared.regions() or shift > 37) return CodestreamError.InvalidCodestream;
 }
 
 /// The code-block style of an SPcod or SPcoc value, whose transform byte
@@ -25769,16 +25877,16 @@ fn parseCodeBlockStyleByte(
     transform: u8,
     high_throughput: ?profile_signaling.HighThroughput,
 ) !ebcot.CodeBlockStyle {
-    if (high_throughput) |ht| {
+    if (high_throughput) |declared| {
         const ht_block = (style & 0x40) != 0;
         // HTONLY declares no Part 1 tile-component; HTDECLARED none mixing
         // the two coders; HTREV no HT tile-component after the 9/7.
-        switch (ht.blockCoders()) {
+        switch (declared.blockCoders()) {
             .ht_only => if (!ht_block) return CodestreamError.InvalidCodestream,
             .ht_declared => if ((style & 0x80) != 0) return CodestreamError.InvalidCodestream,
             .mixed => {},
         }
-        if (ht_block and !ht.irreversible() and
+        if (ht_block and !declared.irreversible() and
             transform == @backingInt(WaveletTransform.irreversible_9_7))
         {
             return CodestreamError.InvalidCodestream;

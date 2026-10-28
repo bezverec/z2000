@@ -5,6 +5,45 @@ entries are grouped by development milestone rather than semantic version.
 
 ## Unreleased
 
+### HTJ2K Codestreams Decode (0.3.0 line)
+
+- Raw HTJ2K (ITU-T T.814 | ISO/IEC 15444-15) codestreams now decode on
+  every native path when each tile-component is all HT or all Part 1
+  code-blocks (HTONLY, HTDECLARED) and each HT code-block has one HT set
+  (SINGLEHT). `ht.zig` is the HT block decoder of T.814 clause 7: the
+  MagSgn, MEL, VLC, SigProp, and MagRef bit-stream readers with their
+  stuffing rules, the quad-pair cleanup pass with the two CxtVLC tables of
+  Annex C (resolved into 7-bit look-ups at compile time), U-VLC residuals,
+  exponent predictors, and the SigProp and MagRef passes, vertically causal
+  context included. Its coefficients follow the Part 1 decoder's layout and
+  midpoint reconstruction, so dequantization, ROI, the inverse DWT,
+  resolution reduction, regions, layer limits, and threading are shared.
+- Tier-2 splits each HT contribution into codeword segments around the HT
+  sets (T.814 B.2, B.3) and folds them across quality layers into one
+  cleanup and one refinement segment. Placeholder passes, which Kakadu's
+  transcodes of multi-layer Part 1 streams put in the earlier layers, are
+  read the way WG1's guideline and the FFmpeg decoder read them: the
+  segment the cleanup pass would end is read first, a zero length means
+  placeholders only, and the rest of their wider length field must be zero.
+- Evidence: all 37 non-MIXED WG1 HT conformance codestreams decode. The 23
+  lossless transcodes give exactly what z2000 gives for their T.803
+  originals and pass those originals' references; the 14 B-limited ones
+  are exact against Kakadu 8.4.1 and Grok 20.4.19 for the 5/3 streams and
+  within one LSB for the 9/7 ones (`ds0_ht_06` component 0 repeats z2000's
+  `p0_06` ROI reconstruction, which both references also differ from).
+  The codestreams of all 20 WG1 JPH files decode exactly as Kakadu decodes
+  them, and `file10_b12` exactly as its published `reference_jph` images.
+  Two new Kakadu fixtures (a three-layer lossless transcode with placeholder
+  passes, and a B = 8 transcode with HT SigProp and MagRef passes and
+  vertically causal context) are exact against Kakadu and Grok, and their
+  layer-limited decodes against Grok. The corpus has the 40 WG1 HT streams
+  as optional entries and the three Kakadu HT fixtures as committed ones:
+  167 passes, 22 expected fail-closed cases, no mismatch with the optional
+  root, 107/19/63 skipped without it.
+- Still closed: MIXED tile-components (`UnsupportedPayload`; the three
+  `ds0_hm` streams), HT code-blocks with more than one HT set (MULTIHT),
+  the JPH file format, and HT encoding.
+
 ### HTJ2K Signalling Is Parsed And Checked (0.3.0 line)
 
 - The main header of an HTJ2K codestream is now read in full before it is
