@@ -5,6 +5,20 @@ entries are grouped by development milestone rather than semantic version.
 
 ## Unreleased
 
+### Lossy HT Encoding (0.3.0 line)
+
+- `--ht` now also takes the 9/7 transform: each quantized band is coded
+  whole in one HT cleanup pass, so the quantization alone sets the quality.
+  The CAP marker declares HTIRV (Ccap15 bit 5) and the smallest MAGB bound
+  covering every band's M_b at its decomposition level (T.814 8.7.3).
+  Kakadu, OpenJPEG, and z2000 decode the output exactly as the Part 1
+  stream of the same quantization; `--rates` stays Part 1 only. An HT
+  block whose magnitudes would exceed its band's M_b is refused rather than
+  signalled wrongly.
+- The raster commands' `--transform 9-7` now defaults to scalar-expounded
+  step sizes and, for colour input, the ICT, which before had to be given
+  with `--qstyle` and `--mct` (the command failed without them).
+
 ### Faster JP2 Wrapping (0.3.0 line)
 
 - Wrapping a codestream in JP2 or JPH checks each packet body for SOP and

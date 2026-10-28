@@ -18,8 +18,8 @@ Neither figure nor that result is a formal ISO conformance certification.
 On `main` (the 0.3.0 line, not yet released) raw HTJ2K (Part 15)
 codestreams and JPH files decode as well, including all 40 WG1 HT
 conformance streams and 16 of the 20 WG1 JPH files, and `--ht` writes
-lossless HTJ2K codestreams and JPH files (lossy HT encoding comes later,
-[roadmap](docs/roadmap.md), section 6).
+lossless and 9/7 lossy HTJ2K codestreams and JPH files (rate targets for
+HT come later, [roadmap](docs/roadmap.md), section 6).
 
 The current prerelease is [`v0.2.0-rc.7`](https://github.com/bezverec/z2000/releases/tag/v0.2.0-rc.7),
 with binaries for Windows x86-64, Linux x86-64, and Linux RISC-V 64. It has no
@@ -478,12 +478,14 @@ than silently changing the codestream profile.
 ### Profile And Quality
 
 - **--mct MODE**: Color transform: **rct** for reversible RGB, **ict** for
-  irreversible RGB, or **none** for component-independent coding. RGBA
-  defaults to **rct** over RGB only; gray+alpha always uses **none**.
+  irreversible RGB, or **none** for component-independent coding. Colour
+  input defaults to **rct** with 5-3 and **ict** with 9-7 (RGBA over RGB
+  only); gray+alpha always uses **none**.
 - **--transform MODE**: Wavelet transform: reversible **5-3** or irreversible
   **9-7**.
 - **--qstyle STYLE**: Quantization: **none**, **scalar-derived**, or
-  **scalar-expounded**. Use none with 5-3 and a scalar style with 9-7.
+  **scalar-expounded**. Use none with 5-3 and a scalar style with 9-7, which
+  defaults to **scalar-expounded**.
 - **--guard-bits N**: Number of QCD guard bits.
 - **--layers N**: On encode, number of untargeted quality layers. On decode,
   reconstruct only the leading N layers; zero means all signalled layers.
@@ -530,8 +532,11 @@ Boolean marker and style options also accept a **--no-...** form.
 - **--t1-backend BACKEND**: Use the normal **iso-mq** backend or the internal
   **legacy-mq** compatibility backend.
 - **--ht**: Code every block with the HTJ2K (Part 15) block coder, one
-  lossless cleanup pass each; the output is a JPH file (brand `jph `) and
-  needs a decoder that reads HTJ2K. Reversible 5/3 without `--rates`.
+  cleanup pass each; the output is a JPH file (brand `jph `) and needs a
+  decoder that reads HTJ2K. With the reversible 5/3 transform the image is
+  lossless; with `--transform 9-7` every quantized band is coded whole, so
+  the quantization alone sets the quality, and the image decodes as the
+  Part 1 stream of the same options does. Not with `--rates`.
 - **--bypass**: Enable selective arithmetic-coding bypass.
 - **--reset-context**: Reset MQ contexts at coding-pass boundaries.
 - **--terminate-all**: Terminate every coding pass.

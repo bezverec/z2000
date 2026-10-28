@@ -229,7 +229,8 @@ Important `tiff-to-jp2` options:
 - `--tile-parts none|R|L|C|P`
 - `--sop`, `--eph`, `--ppm`, `--ppt`, `--tlm`
 - `--t1-backend iso-mq|legacy-mq`
-- `--ht` (HTJ2K block coder, lossless; writes a JPH file)
+- `--ht` (HTJ2K block coder, one cleanup pass per block: lossless with
+  5/3, the quantized bands whole with 9/7; writes a JPH file)
 - `--bypass`
 - `--threads N`
 - `--debug-temp-sidecar`

@@ -15090,7 +15090,45 @@ test "HT encoder codes wide components through the native encoder" {
     }
 }
 
-test "HT encoder refuses what one lossless cleanup pass cannot code" {
+test "HT encoder codes quantized 9/7 bands as Part 1 would" {
+    const allocator = std.testing.allocator;
+    const texture = htGrayTextureForTest();
+    var rgb_samples: [64 * 48 * 3]u16 = undefined;
+    for (texture, 0..) |sample, index| {
+        const value: u16 = @intCast(sample);
+        rgb_samples[3 * index] = value;
+        rgb_samples[3 * index + 1] = 255 - value;
+        rgb_samples[3 * index + 2] = (value * 7) % 256;
+    }
+    const rgb = image.RgbImage{ .allocator = allocator, .width = 64, .height = 48, .bit_depth = 8, .samples = &rgb_samples };
+    const variants = [_]codestream.LosslessOptions{
+        .{ .transform = .irreversible_9_7, .quantization = .scalar_expounded, .mct = .ict, .levels = 3 },
+        .{ .transform = .irreversible_9_7, .quantization = .scalar_derived, .mct = .ict, .levels = 2, .tile_width = 40, .tile_height = 40, .guard_bits = 1 },
+        .{ .transform = .irreversible_9_7, .quantization = .scalar_expounded, .mct = .ict, .levels = 0, .layers = 2, .block_width = 16, .block_height = 16 },
+    };
+    for (variants) |part1_options| {
+        var options = part1_options;
+        options.high_throughput = true;
+        const stream = try codestream.encodeLosslessWithOptions(allocator, rgb, options);
+        defer allocator.free(stream);
+        const part1 = try codestream.encodeLosslessWithOptions(allocator, rgb, part1_options);
+        defer allocator.free(part1);
+        // HTIRV (bit 5) and a MAGB bound covering every band's M_b at its
+        // decomposition level.
+        const ccap15 = try expectHighThroughputHeaderForTest(stream);
+        try std.testing.expect((ccap15 & 0x20) != 0);
+        var decoded = try codestream.decodeLosslessNativeWithOptions(allocator, stream, .{}, .{});
+        defer decoded.deinit();
+        var expected = try codestream.decodeLosslessNativeWithOptions(allocator, part1, .{}, .{});
+        defer expected.deinit();
+        // One cleanup pass codes every quantized bit, as Part 1's passes do.
+        for (0..3) |component| {
+            try std.testing.expectEqualSlices(i64, expected.planes[component].samples, decoded.planes[component].samples);
+        }
+    }
+}
+
+test "HT encoder refuses what one cleanup pass cannot code" {
     const allocator = std.testing.allocator;
     var samples = [_]u16{ 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12 };
     const rgb = image.RgbImage{ .allocator = allocator, .width = 2, .height = 2, .bit_depth = 8, .samples = &samples };
@@ -15098,7 +15136,9 @@ test "HT encoder refuses what one lossless cleanup pass cannot code" {
     rated.rates[0] = 4;
     const refused = [_]codestream.LosslessOptions{
         rated,
-        .{ .high_throughput = true, .transform = .irreversible_9_7, .quantization = .scalar_expounded, .mct = .ict },
+        // The 9/7 transform codes quantized bands, the 5/3 whole ones.
+        .{ .high_throughput = true, .transform = .irreversible_9_7, .quantization = .none, .mct = .ict },
+        .{ .high_throughput = true, .quantization = .scalar_expounded },
         .{ .high_throughput = true, .bypass = true },
         .{ .high_throughput = true, .terminate_all = true },
         .{ .high_throughput = true, .segmentation_symbols = true },

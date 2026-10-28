@@ -1102,10 +1102,16 @@ about 65 ms against Kakadu's 35 ms; twenty threads take 25 ms, level with
 Kakadu (`benchmarks.md`). What remains at one thread is the line analysis
 (7 ms), the serial codeword loop (about 10), MagSgn (7), and outside the
 block coder the TIFF read, RCT, and DWT passes over fresh 32-bit planes
-(about 26 ms together) and the segment and codestream copies. Next, in order: quantization-driven lossy HT
-(9/7), rate targets through complexity control (HT SigProp and MagRef
-passes, then MULTIHT streams of z2000's own making), and encoder and
-decoder speed alongside.
+(about 26 ms together) and the segment and codestream copies. Done,
+2026-10-28: quantization-driven lossy HT, `--ht` with the 9/7 transform
+coding every quantized band whole; Kakadu, OpenJPEG, and z2000 decode it
+exactly as the Part 1 stream of the same quantization (89 inputs and
+option sets), Grok within 2 LSB as on Kakadu's own HT streams. At z2000's
+default step sizes (Kakadu's `Qstep` 1/256 at 8 bits) the 2048x2048 RGB
+image codes to 8.13 MB, as Kakadu's `Cmodes=HT` default does. Next, in
+order: a quality setting for the 9/7 step sizes, rate targets through
+complexity control (HT SigProp and MagRef passes, then MULTIHT streams of
+z2000's own making), and encoder and decoder speed alongside.
 
 The HT packet headers need one rule T.814 leaves implicit. Kakadu's
 transcodes of multi-layer Part 1 streams keep each packet's coding passes,

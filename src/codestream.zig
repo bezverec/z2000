@@ -1670,7 +1670,7 @@ fn wideComponentwiseMainHeaderBytes(
     if (encode_options.high_throughput) {
         var magnitude_bits: u8 = 0;
         for (quantizations) |quantization| magnitude_bits = @max(magnitude_bits, std.mem.max(u8, &quantization.bitplanes));
-        try appendHighThroughputCap(allocator, &out, magnitude_bits);
+        try appendHighThroughputCap(allocator, &out, magnitude_bits, false);
     }
     const two_byte_selector = component_count > 256;
     try appendCod(allocator, &out, levels, encode_options);
@@ -2627,7 +2627,7 @@ fn sampledMainHeaderBytes(
 ) ![]u8 {
     var out: std.ArrayList(u8) = .empty;
     errdefer out.deinit(allocator);
-    try appendSizAndCapabilities(allocator, &out, profile, encode_options, reversibleMagnitudeBits(sizMaxComponentDepth(profile), encode_options));
+    try appendSizAndCapabilities(allocator, &out, profile, encode_options, try highThroughputMagnitudeBound(sizMaxComponentDepth(profile), levels, encode_options));
     try appendCod(allocator, &out, levels, encode_options);
     try appendQcd(allocator, &out, levels, bit_depth, encode_options);
     return out.toOwnedSlice(allocator);
@@ -5346,7 +5346,7 @@ fn assembleSingleTileCodestream(
     const magnitude_bits = if (input.wide_quantization) |quantization|
         std.mem.max(u8, &quantization.bitplanes)
     else
-        reversibleMagnitudeBits(sizMaxComponentDepth(siz), encode_options);
+        try highThroughputMagnitudeBound(sizMaxComponentDepth(siz), levels, encode_options);
     try appendSizAndCapabilities(allocator, &out, siz, encode_options, magnitude_bits);
     try appendCod(allocator, &out, levels, encode_options);
     if (input.wide_quantization) |quantization| {
@@ -21389,22 +21389,26 @@ fn appendSizAndCapabilities(
     var siz = profile;
     if (options.high_throughput) siz.rsiz = profile_signaling.rsiz_cap_present;
     try appendSizForComponents(allocator, out, siz);
-    if (options.high_throughput) try appendHighThroughputCap(allocator, out, magnitude_bits);
+    if (options.high_throughput) {
+        try appendHighThroughputCap(allocator, out, magnitude_bits, options.transform == .irreversible_9_7);
+    }
 }
 
 /// CAP with Pcap bit 17 (Part 15) and its Ccap15 word (T.814 A.3): every
 /// code-block HT (HTONLY) with one HT set (SINGLEHT), the same in every
-/// tile (HOMOGENEOUS), no RGN, reversible transforms only (HTREV), and the
-/// smallest MAGB set (Table 4) whose bound B covers `magnitude_bits`.
-fn appendHighThroughputCap(allocator: std.mem.Allocator, out: *std.ArrayList(u8), magnitude_bits: u8) !void {
+/// tile (HOMOGENEOUS), no RGN, reversible transforms only (HTREV) unless
+/// `irreversible` (HTIRV, bit 5), and the smallest MAGB set (Table 4) whose
+/// bound B reaches `magnitude_bound`.
+fn appendHighThroughputCap(allocator: std.mem.Allocator, out: *std.ArrayList(u8), magnitude_bound: u8, irreversible: bool) !void {
     var magnitude_set: u16 = 0;
     while (magnitude_set < 31 and
-        (profile_signaling.HighThroughput{ .ccap15 = magnitude_set }).magnitudeBound() < magnitude_bits) : (magnitude_set += 1)
+        (profile_signaling.HighThroughput{ .ccap15 = magnitude_set }).magnitudeBound() < magnitude_bound) : (magnitude_set += 1)
     {}
+    const htirv: u16 = 0x0020;
     try appendMarker(allocator, out, .cap);
     try appendU16Be(allocator, out, 8);
     try appendU32Be(allocator, out, profile_signaling.pcap_part15);
-    try appendU16Be(allocator, out, magnitude_set);
+    try appendU16Be(allocator, out, magnitude_set | if (irreversible) htirv else 0);
 }
 
 /// A bound on the magnitude bits of reversible bands of `depth`-bit
@@ -21413,13 +21417,39 @@ fn reversibleMagnitudeBits(depth: u8, options: LosslessOptions) u8 {
     return depth + 3 + @intFromBool(options.mct == .rct);
 }
 
-/// The HT encoder's envelope: lossless code-blocks of one cleanup pass,
-/// which leave no truncation points for rate targets; no RGN, which needs
-/// Ccap15 bit 12; and of the Part 1 mode flags only the vertically causal
-/// context, which T.814 keeps for SigProp.
+/// The MAGB bound B (T.814 8.7.3) that HT code-blocks of `depth`-bit
+/// components need: the reversible magnitude bits, or for the 9/7 transform
+/// the smallest B with every band's M_b = G + epsilon_b - 1 within its bound
+/// 2^min(31, B + n_b - 1), n_b the band's decomposition level; past 31 bits
+/// the bound is 2^B whatever the transform.
+fn highThroughputMagnitudeBound(depth: u8, levels: u8, options: LosslessOptions) !u8 {
+    if (options.transform != .irreversible_9_7) return reversibleMagnitudeBits(depth, options);
+    var bound: u8 = 0;
+    var deepest: u8 = 0;
+    var level: u8 = 0;
+    while (level <= levels) : (level += 1) {
+        const kinds: []const subband.Kind = if (level == levels) &.{ .ll, .hl, .lh, .hh } else &.{ .hl, .lh, .hh };
+        for (kinds) |kind| {
+            // The LL band is at level NL; the detail bands from level 1.
+            if (kind != .ll and level == 0) continue;
+            const step = try irreversibleBandStepSizeFor(options.quantization, depth, kind, level, levels);
+            const bitplanes = options.guard_bits + step.exponent - 1;
+            deepest = @max(deepest, bitplanes);
+            bound = @max(bound, (bitplanes + 1) -| level);
+        }
+    }
+    return if (deepest > 31) @max(32, deepest) else bound;
+}
+
+/// The HT encoder's envelope: code-blocks of one cleanup pass, coding the
+/// 5/3 coefficients or the quantized 9/7 ones whole, which leaves no
+/// truncation points for rate targets; no RGN, which needs Ccap15 bit 12;
+/// and of the Part 1 mode flags only the vertically causal context, which
+/// T.814 keeps for SigProp.
 fn validateHighThroughputRequest(options: LosslessOptions) !void {
     if (!options.high_throughput) return;
-    if (options.transform != .reversible_5_3 or options.quantization != .none or options.rate_count != 0 or
+    const quantized = options.transform == .irreversible_9_7;
+    if ((options.quantization != .none) != quantized or options.rate_count != 0 or
         options.roi_regions.len != 0 or options.t1_backend != .iso_mq or options.emit_temporary_payload_sidecar or
         options.bypass or options.reset_context or options.terminate_all or
         options.predictable_termination or options.segmentation_symbols)
@@ -23478,6 +23508,9 @@ fn buildRpclShadowBlock(
         if (segment.pass_count != coding_passes) return CodestreamError.InvalidCodestream;
     }
 
+    // The packet header places an HT cleanup pass by M_b alone, so its
+    // magnitudes must stay within the band's M_b.
+    if (segment.high_throughput and segment.bitplanes > nominal_bitplanes) return CodestreamError.InvalidCodestream;
     var layers: [max_quality_layers]t2.LayerTruncation = @splat(.{ .cumulative_passes = 0, .cumulative_bytes = 0 });
     try computeLayerTruncations(&layers, options, segment);
 
@@ -25651,7 +25684,7 @@ fn appendMultiTileMainHeader(
     const magnitude_bits = if (header.wide_quantization) |quantization|
         std.mem.max(u8, &quantization.bitplanes)
     else
-        reversibleMagnitudeBits(sizMaxComponentDepth(header.siz), encode_options);
+        try highThroughputMagnitudeBound(sizMaxComponentDepth(header.siz), levels, encode_options);
     try appendSizAndCapabilities(allocator, out, header.siz, encode_options, magnitude_bits);
     try appendCod(allocator, out, levels, encode_options);
     if (header.wide_quantization) |quantization| {

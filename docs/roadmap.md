@@ -160,7 +160,10 @@ Order, each step under the normal slice gates:
    (two HT sets generated, at most three passes kept per block). Lossless
    done, 2026-10-28: `--ht` on every raster and wide writer; Kakadu 8.4.1,
    Grok 20.4.19, and OpenJPEG 2.5.4 decode the output exactly, at Kakadu's
-   file size.
+   file size. Quantization-driven lossy done, 2026-10-28: `--ht` with the
+   9/7 transform codes each quantized band whole (HTIRV, Ccap15 bit 5);
+   Kakadu, OpenJPEG, and z2000 decode it exactly as the Part 1 stream of
+   the same quantization.
 5. Later: MIXED and MULTIHT streams and lossless JP2 <-> JPH transcoding,
    which z2000 can do at the quantized-sample level with both block coders.
    MIXED done, 2026-10-28 (all 40 WG1 HT streams decode).

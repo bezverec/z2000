@@ -500,6 +500,7 @@ fn rasterToJp2Command(
     var poc_storage: [64]codestream.PocRecord = undefined;
     var tile_parts_explicit = false;
     var mct_explicit = false;
+    var quantization_explicit = false;
     var show_timings = false;
     var page: ?usize = null;
     var index: usize = 2;
@@ -558,6 +559,7 @@ fn rasterToJp2Command(
             index += 1;
             if (index >= args.len) return error.MissingValue;
             options.quantization = try parseQuantizationStyle(args[index]);
+            quantization_explicit = true;
         } else if (std.mem.eql(u8, args[index], "--guard-bits")) {
             index += 1;
             if (index >= args.len) return error.MissingValue;
@@ -660,6 +662,10 @@ fn rasterToJp2Command(
     if (options.poc_records.len != 0 and !tile_parts_explicit) {
         options.tile_part_divisions = null;
     }
+    // The 9/7 transform quantizes: one step size per band unless told.
+    if (options.transform == .irreversible_9_7 and !quantization_explicit) {
+        options.quantization = .scalar_expounded;
+    }
 
     const conversion = RasterConversion{
         .input = input,
@@ -680,6 +686,12 @@ fn rasterToJp2Command(
     };
     defer decoded.deinit();
     try encodeRasterToJp2(io, allocator, decoded, args[0], args[1], conversion, elapsedNs(read_start));
+}
+
+/// The component transform of colour input unless told: the RCT with the
+/// 5/3 wavelet, the ICT with the 9/7.
+fn colorTransformFor(options: codestream.LosslessOptions) codestream.MultipleComponentTransform {
+    return if (options.transform == .irreversible_9_7) .ict else .rct;
 }
 
 const RasterConversion = struct {
@@ -781,6 +793,7 @@ fn encodeRasterToJp2(
             height = rgb.height;
             bit_depth = rgb.bit_depth;
             components = 3;
+            if (!mct_explicit) options.mct = colorTransformFor(options);
 
             const encode_start = monotonicNs();
             const j2k = if (show_timings)
@@ -837,7 +850,7 @@ fn encodeRasterToJp2(
         },
         .alpha => |alpha| {
             if (!mct_explicit) {
-                options.mct = if (alpha.color_space == .rgb) .rct else .none;
+                options.mct = if (alpha.color_space == .rgb) colorTransformFor(options) else .none;
             }
             width = alpha.width;
             height = alpha.height;

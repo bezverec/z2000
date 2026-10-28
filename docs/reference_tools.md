@@ -351,6 +351,14 @@ here so they are not rediscovered as new.
   TIFF of an RGBA file differs from the source in 527 samples whether the
   file is HT or Part 1 (its alpha handling), so compare RGBA against Kakadu
   and Grok.
+- **Lossy HT** (`--ht --transform 9-7`): Kakadu and OpenJPEG decode each
+  z2000 HT stream to the same image as the Part 1 stream of the same
+  quantization, as z2000 does (89 inputs and option sets). Grok decodes the
+  two differently, both within 2 LSB of Kakadu, as it does Kakadu's own
+  `Cmodes=HT` lossy streams: its 9/7 rounding, not the HT data. Kakadu's
+  default lossy HT of the 2048x2048 RGB bench image is 8,131,819 bytes
+  (one guard bit, Ccap15 0x0022, B = 10); z2000's is 8,128,094 bytes (two
+  guard bits, Ccap15 0x0023, B = 11).
 
 ## Methodological Cautions
 
