@@ -46,7 +46,28 @@ On Windows, the equivalent harness can include the irreversible profile:
   -OutDir .\zig-out\bench-compare -Runs 8 -Warmup 2 -Threads 16 -IncludeLossy
 ```
 
-## 2026-10-28: Intel Core i5-14500, HT rate targets by estimated planes
+## 2026-11-12: Intel Core i5-14500, HT block decoder without refills
+
+Base `806484f`, `bench-rgb-2048.tif` coded with `--ht` (lossless 5/3,
+RCT), `decode-temp-jp2`, ReleaseFast, interleaved rounds, medians of
+`--timings`:
+
+| Threads | Rounds | Total | Block payload |
+| --- | --- | --- | --- |
+| 1 | 12 | 123.5 -> 109.6 ms | 80.0 -> 64.3 ms |
+| 20 | 20 | 36.9 -> 34.2 ms | 24.5 -> 21.9 ms |
+
+Steps, measured by a microbenchmark that decodes the image's 3072 HT
+blocks (the same 10.0 MB of cleanup segments) into pre-faulted memory, 30
+rounds, minimum: 67.5 ms before; unstuffed MagSgn and VLC bits 61.4; one
+VLC load per quad pair 54.4; one MagSgn load per quad 51.5. In the CLI,
+writing whole quads instead of clearing the block first saved another
+5 ms: about 9 ms of the block stage is the first touch of the 48 MB of
+fresh coefficient planes, which a clear or the first write pays either
+way. Tried and rejected: the four MagSgn values in vector lanes (+4%),
+a VLC pass over each quad row before its MagSgn pass, as OpenJPH does
+(+6%), and decoding a quad without its significance branch (no change).
+
 
 Base `76051f6`, `bench-rgb-2048.tif`, `--ht --rates 8`, ReleaseFast,
 interleaved rounds, medians of `--timings`:

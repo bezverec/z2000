@@ -1089,7 +1089,13 @@ Kakadu 8.4.1's 67.6 ms; at twenty threads z2000 takes 60.7 ms against 45.0.
 What remains in the block decoder is the per-sample MagSgn and per-quad VLC
 work; closing the gap needs the OpenJPH/Kakadu style (quad pairs through
 joint tables, vectorized MagSgn unpacking), and at many threads the stages
-around Tier-1. Done, 2026-10-28: MIXED tile-components, each block's coder
+around Tier-1. Speed, second pass, 2026-11-12: the block decoder reads
+unstuffed MagSgn and VLC bits without refills (Tier-1 at one thread 80 ->
+64 ms, the `--timings` total 124 -> 110 ms; twenty threads 37 -> 34 ms;
+these are in-process totals, not the wall times above). At one thread the rest is about 52 ms of block
+decoding, 9 ms of first touches of the coefficient planes, and 24 ms of
+5/3 synthesis; vector MagSgn lanes and a separate VLC pass per quad row
+were slower. Done, 2026-10-28: MIXED tile-components, each block's coder
 told from its first non-empty codeword segment (T.814 A.4); all 40 WG1 HT
 streams decode. MULTIHT (more than one HT set per block) waits for the
 encoder: no WG1 stream has it, and Kakadu 8.4.1 with `Cplex` and

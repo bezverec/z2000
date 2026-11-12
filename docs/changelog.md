@@ -5,6 +5,22 @@ entries are grouped by development milestone rather than semantic version.
 
 ## Unreleased
 
+### Faster HT Block Decoding (0.3.0 line)
+
+- The HT block decoder removes the MagSgn and VLC stuffing of a cleanup
+  segment in one pass (four bytes at a time where no byte can carry a
+  stuffing bit), so the quad loop reads its bits without refills: one load
+  per quad pair for the CxtVLC and U-VLC codes, one per quad for its MagSgn
+  values when they fit 56 bits, and a read past either stream is caught
+  once per pair, the padding behind the bits keeping the reads in bounds.
+  Both U-VLC prefixes of a pair come from one table lookup, every quad
+  writes all four of its samples and its share of the line below (the
+  block and the lines are no longer cleared first), and the per-sample
+  checks moved to the quad. The 2048x2048 RGB lossless HT image decodes in
+  110 ms at one thread (was 124; Tier-1 64 ms, was 80) and 34 ms at twenty
+  (was 37). Decoded samples are unchanged; a new unit test checks the
+  unstuffed bits against a bit-by-bit reading of random byte strings.
+
 ### Decoder Fixes (0.3.0 line)
 
 - A stream in which every component overrides COD's decomposition levels

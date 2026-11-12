@@ -151,8 +151,13 @@ Order, each step under the normal slice gates:
    transcodes against their T.803 originals' references, B-limited ones
    against Kakadu 8.4.1 and Grok 20.4.19), and so do the codestreams of the
    20 WG1 JPH files. OpenJPEG 2.5.4 fails on most multi-layer transcodes,
-   so it is no oracle here. Next for this step: decode speed, the point of
-   HT, measured against Kakadu and OpenJPH.
+   so it is no oracle here. Decode speed, 2026-11-12: the block decoder
+   reads its MagSgn and VLC bits from unstuffed copies without refills;
+   the 2048x2048 RGB lossless image's `--timings` total went from 124 to
+   110 ms at one thread (Tier-1 80 -> 64 ms) and from 37 to 34 ms at
+   twenty. At one thread that is still well behind Kakadu 8.4.1 (67.6 ms
+   wall on 2026-10-28): about 52 ms of pure block decoding, 9 ms of first
+   touches of the coefficient planes, and the 24 ms 5/3 synthesis.
 3. JPH file format: the `jph ` brand and parametrized (H.273) colour.
    Done, 2026-10-28: 16 of the 20 WG1 JPH files render through the JP2
    path; a channel-reordering `cdef` and an unspecified colour space stay
