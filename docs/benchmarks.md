@@ -58,6 +58,11 @@ medians of `--timings` (inverse DWT, then total):
 | Part 1 lossless | 1 | 24.2 -> 11.5 ms | 722.6 -> 693.3 ms |
 
 One 2048x2048 plane, five levels, in a microbenchmark: 7.0 -> 3.0 ms.
+
+The 9/7 column synthesis the same way (`--ht --transform 9-7` and the
+Part 1 9/7 default stream): inverse DWT at one thread 44.4 -> 30.3 ms (HT)
+and 41.9 -> 29.2 ms (Part 1), at twenty 3.3 -> 2.8 ms; one plane 9.3 ->
+4.8 ms. The rest of that stage is dequantization and the row synthesis.
 The twenty-thread totals also gain from overlapping the synthesis with
 Tier-1 sooner.
 

@@ -80,8 +80,9 @@ pub fn forward2DOrigin(
     defer allocator.free(line);
     var scratch = try allocator.alloc(f32, max_dim);
     defer allocator.free(scratch);
+    // The whole band for `inverse97VerticalBandEven`.
     const vertical_scratch_len = if (wavelet == .irreversible_9_7)
-        ((height + 1) / 2) * f32_block_lanes
+        height * f32_block_lanes
     else
         0;
     const vertical_scratch = try allocator.alloc(f32, vertical_scratch_len);
@@ -202,8 +203,9 @@ pub fn inverse2DReducedOrigin(
     defer allocator.free(line);
     var scratch = try allocator.alloc(f32, max_dim);
     defer allocator.free(scratch);
+    // The whole band for `inverse97VerticalBandEven`.
     const vertical_scratch_len = if (wavelet == .irreversible_9_7)
-        ((height + 1) / 2) * f32_block_lanes
+        height * f32_block_lanes
     else
         0;
     const vertical_scratch = try allocator.alloc(f32, vertical_scratch_len);
@@ -531,12 +533,7 @@ fn inverse97VerticalBand(
     pack_scratch: []f32,
 ) void {
     if (!origin_odd) {
-        unpackVertical(data, stride, col, height, false, pack_scratch);
-        scaleVertical(data, stride, col, height, dwt97_k, dwt97_inv_k);
-        liftVerticalEven(data, stride, col, height, -dwt97_delta);
-        liftVerticalOdd(data, stride, col, height, -dwt97_gamma);
-        liftVerticalEven(data, stride, col, height, -dwt97_beta);
-        liftVerticalOdd(data, stride, col, height, -dwt97_alpha);
+        inverse97VerticalBandEven(data, stride, col, height, pack_scratch);
     } else {
         unpackVertical(data, stride, col, height, true, pack_scratch);
         scaleVertical(data, stride, col, height, dwt97_inv_k, dwt97_k);
@@ -545,6 +542,54 @@ fn inverse97VerticalBand(
         liftVerticalOdd(data, stride, col, height, -dwt97_beta);
         liftVerticalEven(data, stride, col, height, -dwt97_alpha);
     }
+}
+
+/// `inverse97VerticalBand` for an even origin straight from the band's
+/// halves: the scaled low rows and high rows go into `scratch` (the whole
+/// band), the four lifting steps run there with the neighbours and the
+/// operation order of `liftVerticalEven` and `liftVerticalOdd`, and the last
+/// step writes the rows back interleaved. Row 2k + 1 of the band never holds
+/// a high row still to be read.
+fn inverse97VerticalBandEven(data: []f32, stride: usize, col: usize, height: usize, scratch: []f32) void {
+    const lows = (height + 1) / 2;
+    const highs = height / 2;
+    const even = scratch[0 .. lows * f32_block_lanes];
+    const odd = scratch[lows * f32_block_lanes ..][0 .. highs * f32_block_lanes];
+    const scale_even: F32Block = @splat(dwt97_k);
+    const scale_odd: F32Block = @splat(dwt97_inv_k);
+
+    // Scaling, then the -delta step on the even rows: row 2k reads rows
+    // 2k - 1 and 2k + 1, mirrored to 1 and 2k - 1 at the ends.
+    const delta: F32Block = @splat(-dwt97_delta);
+    for (0..lows) |k| {
+        if (k < highs) storeRow(odd, k * f32_block_lanes, loadRow(data, (lows + k) * stride + col) * scale_odd);
+        const left = loadRow(odd, (if (k > 0) k - 1 else 0) * f32_block_lanes);
+        const right = loadRow(odd, (if (k < highs) k else k - 1) * f32_block_lanes);
+        const target = loadRow(data, k * stride + col) * scale_even;
+        storeRow(even, k * f32_block_lanes, target + delta * (left + right));
+    }
+    // -gamma on the odd rows: row 2k + 1 reads rows 2k and 2k + 2, mirrored
+    // to 2k at the end.
+    const gamma: F32Block = @splat(-dwt97_gamma);
+    for (0..highs) |k| {
+        const left = loadRow(even, k * f32_block_lanes);
+        const right = loadRow(even, (if (k + 1 < lows) k + 1 else k) * f32_block_lanes);
+        storeRow(odd, k * f32_block_lanes, loadRow(odd, k * f32_block_lanes) + gamma * (left + right));
+    }
+    const beta: F32Block = @splat(-dwt97_beta);
+    for (0..lows) |k| {
+        const left = loadRow(odd, (if (k > 0) k - 1 else 0) * f32_block_lanes);
+        const right = loadRow(odd, (if (k < highs) k else k - 1) * f32_block_lanes);
+        storeRow(even, k * f32_block_lanes, loadRow(even, k * f32_block_lanes) + beta * (left + right));
+    }
+    const alpha: F32Block = @splat(-dwt97_alpha);
+    for (0..highs) |k| {
+        const left = loadRow(even, k * f32_block_lanes);
+        const right = loadRow(even, (if (k + 1 < lows) k + 1 else k) * f32_block_lanes);
+        storeRow(data, (2 * k) * stride + col, left);
+        storeRow(data, (2 * k + 1) * stride + col, loadRow(odd, k * f32_block_lanes) + alpha * (left + right));
+    }
+    if (height > 2 * highs) storeRow(data, (height - 1) * stride + col, loadRow(even, (lows - 1) * f32_block_lanes));
 }
 
 fn liftVerticalOdd(data: []f32, stride: usize, col: usize, height: usize, coefficient: f32) void {
@@ -1030,7 +1075,8 @@ pub fn forward97Parallel(
     }
     const workers = forwardDwt97WorkerCount(thread_count);
     const max_dim = @max(width, height);
-    const pack_len = ((height + 1) / 2) * f32_block_lanes;
+    // The whole band for `inverse97VerticalBandEven`.
+    const pack_len = height * f32_block_lanes;
     const scratch_len = pack_len + 2 * max_dim;
     const scratches = try allocDwt97Scratches(allocator, workers, scratch_len);
     defer freeDwt97Scratches(allocator, scratches);
@@ -1128,7 +1174,8 @@ fn inverse97ParallelFrom(
     if (levels <= last_level) return levels > 0;
     const workers = dwt97WorkerCount(thread_count);
     const max_dim = @max(width, height);
-    const pack_len = ((height + 1) / 2) * f32_block_lanes;
+    // The whole band for `inverse97VerticalBandEven`.
+    const pack_len = height * f32_block_lanes;
     const scratch_len = pack_len + 2 * max_dim;
     const scratches = try allocDwt97Scratches(allocator, workers, scratch_len);
     defer freeDwt97Scratches(allocator, scratches);

@@ -17,6 +17,13 @@ entries are grouped by development milestone rather than semantic version.
   compared with the old code); one 2048x2048 plane takes 3.0 ms instead of
   7.0. The lossless HT image's synthesis at one thread takes 12 ms (was
   25); Part 1 lossless decodes gain the same.
+- The 9/7 column synthesis of an even-origin band does the same: the
+  scaled halves go into scratch, the four lifting steps run there with the
+  neighbours and the operation order of the old in-place steps, and the
+  last one writes the rows back interleaved, instead of eight sweeps over
+  the plane's strided rows. Bit-identical (5,000 random planes, f32
+  compared bit for bit); one 2048x2048 plane takes 4.8 ms instead of 9.3,
+  and the lossy HT image's synthesis stage at one thread 30 ms (was 44).
 
 ### Faster HT Block Decoding (0.3.0 line)
 
