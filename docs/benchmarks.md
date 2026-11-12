@@ -46,6 +46,23 @@ On Windows, the equivalent harness can include the irreversible profile:
   -OutDir .\zig-out\bench-compare -Runs 8 -Warmup 2 -Threads 16 -IncludeLossy
 ```
 
+## 2026-11-12: Intel Core i5-14500, HT decode against Kakadu, wall time
+
+`4cf123b` against the morning's `806484f` and Kakadu 8.4.1 `kdu_expand`
+(`-num_threads 0` for one thread), `bench-rgb-2048.tif` coded by z2000 with
+`--ht` (lossless) and `--ht --transform 9-7`, TIFF output, process wall
+time including start-up, interleaved, median of 10 rounds:
+
+| Stream | Threads | z2000 `806484f` | z2000 `4cf123b` | Kakadu |
+| --- | --- | --- | --- | --- |
+| HT lossless | 1 | 138.6 ms | 97.9 ms | 94.3 ms |
+| HT lossless | 20 | 58.2 ms | 41.9 ms | 57.9 ms |
+| HT 9/7 | 1 | 169.4 ms | 114.2 ms | 92.0 ms |
+| HT 9/7 | 20 | 61.3 ms | 45.3 ms | 53.6 ms |
+
+The 2026-10-28 figure of 67.6 ms for Kakadu at one thread was measured
+without TIFF output; with it Kakadu takes about 94 ms here.
+
 ## 2026-11-12: Intel Core i5-14500, timed 5/3 plane finishing
 
 Base `283f3a9`, lossless HT `bench-rgb-2048.tif`, interleaved rounds,

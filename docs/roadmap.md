@@ -160,7 +160,11 @@ Order, each step under the normal slice gates:
    touches of the coefficient planes, and the 12 ms 5/3 synthesis (24
    before its two-sweep rewrite, 2026-11-12; the whole decode 92 ms). At
    twenty threads the decode takes 21.6 ms (`--timings`) since the
-   coefficient planes are faulted in run by run before Tier-1.
+   coefficient planes are faulted in run by run before Tier-1. Wall time
+   with TIFF output against Kakadu 8.4.1 (`benchmarks.md`, 2026-11-12):
+   lossless 97.9 against 94.3 ms at one thread and 41.9 against 57.9 at
+   twenty; 9/7 114.2 against 92.0 and 45.3 against 53.6. What is left is
+   the one-thread 9/7 decode.
 3. JPH file format: the `jph ` brand and parametrized (H.273) colour.
    Done, 2026-10-28: 16 of the 20 WG1 JPH files render through the JP2
    path; a channel-reordering `cdef` and an unspecified colour space stay
