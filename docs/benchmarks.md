@@ -88,6 +88,11 @@ time including start-up, interleaved, median of 10 rounds:
 The 2026-10-28 figure of 67.6 ms for Kakadu at one thread was measured
 without TIFF output; with it Kakadu takes about 94 ms here.
 
+Again at `23f4ec5`, same method: lossless 97.5 ms (Kakadu 94.1) at one
+thread and 41.9 (57.7) at twenty; 9/7 108.4 (91.7) and 43.5 (54.8). A
+process that only starts and exits takes about 13 ms here, for z2000,
+Kakadu, and an empty program alike.
+
 ## 2026-11-12: Intel Core i5-14500, timed 5/3 plane finishing
 
 Base `283f3a9`, lossless HT `bench-rgb-2048.tif`, interleaved rounds,

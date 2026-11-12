@@ -163,8 +163,8 @@ Order, each step under the normal slice gates:
    coefficient planes are faulted in run by run before Tier-1. Wall time
    with TIFF output against Kakadu 8.4.1 (`benchmarks.md`, 2026-11-12):
    lossless 97.9 against 94.3 ms at one thread and 41.9 against 57.9 at
-   twenty; 9/7 114.2 against 92.0 and 45.3 against 53.6. What is left is
-   the one-thread 9/7 decode.
+   twenty; 9/7 108.4 against 91.7 and 43.5 against 54.8 (`23f4ec5`). What
+   is left is the one-thread 9/7 decode.
 3. JPH file format: the `jph ` brand and parametrized (H.273) colour.
    Done, 2026-10-28: 16 of the 20 WG1 JPH files render through the JP2
    path; a channel-reordering `cdef` and an unspecified colour space stay
