@@ -16,6 +16,9 @@ entries are grouped by development milestone rather than semantic version.
   was 28.1) and 25.3 ms (9/7, was 33.0) at twenty threads, 28.4 ms
   (lossless, was 34.7) at four; Part 1 streams, where Tier-1 dominates,
   change little. A unit test checks that the touches keep every byte.
+- On one thread the planes are faulted in run by run too, serially: the
+  same first touches in block order cost more. The lossless HT image's
+  block stage at one thread takes 51.9 ms (was 56.6).
 
 ### Faster Decoder Synthesis (0.3.0 line)
 

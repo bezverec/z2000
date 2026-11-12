@@ -186,9 +186,9 @@ pub fn deinitInBackground(value: anytype) void {
 /// contiguous runs, and leaves their contents as they were. Fresh pages
 /// that many threads first touch in a scattered order (a code-block's rows
 /// across a plane) fault far slower on Windows than the same pages touched
-/// run by run. Does nothing on one thread or when the pool is busy.
+/// run by run, and on one thread too contiguous first touches beat the
+/// same faults in block order.
 pub fn touchPages(threads: usize, regions: []const []u8) void {
-    if (builtin.single_threaded or threads < 2) return;
     const chunk_bytes = 1 << 20;
     var chunk_count: usize = 0;
     for (regions) |region| chunk_count += std.math.divCeil(usize, region.len, chunk_bytes) catch unreachable;
@@ -216,7 +216,11 @@ pub fn touchPages(threads: usize, regions: []const []u8) void {
         }
     };
     var context = Context{ .regions = regions };
-    _ = run(threads, chunk_count, &context, Context.task);
+    // One thread, or a busy pool: the runs in order on this thread, still
+    // cheaper than the same faults in block order.
+    if (builtin.single_threaded or threads < 2 or !run(threads, chunk_count, &context, Context.task)) {
+        for (0..chunk_count) |index| Context.task(&context, index);
+    }
 }
 
 /// `run` over a slice of jobs, one index per job, each handed to `work`.

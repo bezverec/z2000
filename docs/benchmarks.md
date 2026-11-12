@@ -46,6 +46,30 @@ On Windows, the equivalent harness can include the irreversible profile:
   -OutDir .\zig-out\bench-compare -Runs 8 -Warmup 2 -Threads 16 -IncludeLossy
 ```
 
+## 2026-11-12: Intel Core i5-14500, one-thread decode tail
+
+Base `251ad96`, `bench-rgb-2048.tif`, ReleaseFast, interleaved rounds
+(12), medians of `--timings`; the three changes below together:
+
+| Stream | Threads | Total | Block payload | Inverse DWT + MCT |
+| --- | --- | --- | --- | --- |
+| HT lossless | 1 | 87.7 -> 81.4 ms | 56.6 -> 51.9 ms | unchanged |
+| HT 9/7 | 1 | 105.2 -> 95.2 ms | 54.9 -> 50.9 ms | 34.2 -> 32.0 ms |
+| HT lossless | 20 | 22.1 -> 21.8 ms | | |
+| HT 9/7 | 20 | 25.4 -> 24.9 ms | | |
+
+- Serial run-by-run page touches on one thread: the block payload rows.
+- 9/7 row synthesis with the scaling folded into the copy into scratch
+  and the last lifting step writing the line back interleaved: one
+  2048x2048 plane 4.7 -> 4.0 ms.
+- 9/7 on one thread dequantizing in the coefficient planes: no second
+  48 MB of f32 planes to fault in and clear; the finest level and the
+  ICT then run in row bands as on several threads (their time moves
+  from the inverse DWT line to the MCT one).
+
+Rejected: the 5/3 finest level and RCT in row bands on one thread as on
+several (inverse DWT + MCT 14.5 -> 14.2 ms, within noise).
+
 ## 2026-11-12: Intel Core i5-14500, coefficient planes faulted in first
 
 Base `d659754`, `bench-rgb-2048.tif`, ReleaseFast, interleaved rounds (12),
