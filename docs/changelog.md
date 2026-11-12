@@ -49,6 +49,12 @@ entries are grouped by development milestone rather than semantic version.
   lets the last lifting step write the line back interleaved (two copies,
   two scalings, and the interleave pass fewer); bit-identical, one
   2048x2048 plane 4.0 ms instead of 4.7.
+- The 8-bit RGB tail's finest 9/7 level, which runs in 32-row bands with
+  four rows of context on either side, transforms each row straight from
+  the plane into its window with the vertical scaling folded into the last
+  lifting step, instead of copying, transforming, and scaling it in three
+  passes. Bit-identical (20,000 random bands compared); that stage of the
+  lossy HT image takes 20.5 ms at one thread (was 22.7).
 - A 9/7 decode on one thread dequantizes in the coefficient planes as the
   threaded decode does, instead of allocating, faulting in, and clearing a
   second set of f32 planes; the finest level and the inverse ICT then run

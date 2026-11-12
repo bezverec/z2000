@@ -46,6 +46,15 @@ On Windows, the equivalent harness can include the irreversible profile:
   -OutDir .\zig-out\bench-compare -Runs 8 -Warmup 2 -Threads 16 -IncludeLossy
 ```
 
+## 2026-11-12: Intel Core i5-14500, finest 9/7 rows without copies
+
+Base `04b4a3e`, lossy HT `bench-rgb-2048.tif`, interleaved rounds (12),
+medians of `--timings`: inverse MCT (the banded finest 9/7 level and the
+ICT) 22.7 -> 20.5 ms at one thread and 2.78 -> 2.58 ms at twenty; totals
+within noise (94.4 -> 94.8 ms, minimum 91.1 -> 88.0). Rejected: 64-row
+bands instead of 32 (lossless HT at twenty threads +2%, its MCT stage
++22%; lossy no better).
+
 ## 2026-11-12: Intel Core i5-14500, HT decode against Kakadu, wall time
 
 `4cf123b` against the morning's `806484f` and Kakadu 8.4.1 `kdu_expand`

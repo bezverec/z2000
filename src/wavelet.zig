@@ -457,24 +457,49 @@ fn liftSplitEven(even: []f32, odd: []f32, coefficient: f32) void {
     }
 }
 
-/// `liftSplitOdd`, then `interleaveSplit` of the result into `data`.
+/// `liftSplitOdd`, then `interleaveSplit` of the result into `data`; with
+/// `scaled`, every written sample times `scale` (as a later pass would).
 fn liftSplitOddInterleave(data: []f32, even: []const f32, odd: []f32, coefficient: f32) void {
+    liftSplitOddInterleaveScaled(false, data, even, odd, coefficient, 1);
+}
+
+fn liftSplitOddInterleaveScaled(comptime scaled: bool, data: []f32, even: []const f32, odd: []f32, coefficient: f32, scale: f32) void {
+    const scales: F32Block = @splat(scale);
     const coeff: F32Block = @splat(coefficient);
     var j: usize = 0;
     while (j + f32_block_lanes <= odd.len and j + 1 + f32_block_lanes <= even.len) : (j += f32_block_lanes) {
         const target: F32Block = odd[j..][0..f32_block_lanes].*;
         const left: F32Block = even[j..][0..f32_block_lanes].*;
         const right: F32Block = even[j + 1 ..][0..f32_block_lanes].*;
-        const pair: @Vector(2 * f32_block_lanes, f32) = @shuffle(f32, left, target + coeff * (left + right), f32_interleave_mask);
+        const lifted = target + coeff * (left + right);
+        const pair: @Vector(2 * f32_block_lanes, f32) = if (scaled)
+            @shuffle(f32, left * scales, lifted * scales, f32_interleave_mask)
+        else
+            @shuffle(f32, left, lifted, f32_interleave_mask);
         data[2 * j ..][0 .. 2 * f32_block_lanes].* = @as([2 * f32_block_lanes]f32, pair);
     }
     while (j < odd.len) : (j += 1) {
         const right = if (j + 1 < even.len) even[j + 1] else even[j];
         odd[j] += coefficient * (even[j] + right);
-        data[2 * j] = even[j];
-        data[2 * j + 1] = odd[j];
+        data[2 * j] = if (scaled) even[j] * scale else even[j];
+        data[2 * j + 1] = if (scaled) odd[j] * scale else odd[j];
     }
-    if (even.len > odd.len) data[2 * odd.len] = even[odd.len];
+    if (even.len > odd.len) data[2 * odd.len] = if (scaled) even[odd.len] * scale else even[odd.len];
+}
+
+/// `inverse1DOrigin` (9/7, even origin, two samples or more) of `source`
+/// into `dest`, every sample then times `scale`: the same operations as
+/// copying, transforming, and scaling the row in three passes.
+fn inverse97RowScaled(dest: []f32, source: []const f32, scratch: []f32, scale: f32) void {
+    const even_count = (source.len + 1) / 2;
+    const even = scratch[0..even_count];
+    const odd = scratch[even_count..source.len];
+    scaleSplitInto(even, source[0..even_count], dwt97_k);
+    scaleSplitInto(odd, source[even_count..], dwt97_inv_k);
+    liftSplitEven(even, odd, -dwt97_delta);
+    liftSplitOdd(even, odd, -dwt97_gamma);
+    liftSplitEven(even, odd, -dwt97_beta);
+    liftSplitOddInterleaveScaled(true, dest, even, odd, -dwt97_alpha, scale);
 }
 
 /// Lane i of the first vector, then lane i of the second.
@@ -1310,10 +1335,14 @@ pub fn inverse97FinestRows(
     for (lo..hi) |index| {
         const source = if ((index & 1) == low_parity) index / 2 else low_count + index / 2;
         const row = window[(index - lo) * width ..][0..width];
-        @memcpy(row, plane[source * width ..][0..width]);
-        inverse1DOrigin(row, line, .irreversible_9_7, x0);
         const scale = if ((index & 1) == low_parity) dwt97_k else dwt97_inv_k;
-        for (row) |*value| value.* *= scale;
+        if ((x0 & 1) == 0 and width >= 2) {
+            inverse97RowScaled(row, plane[source * width ..][0..width], line, scale);
+        } else {
+            @memcpy(row, plane[source * width ..][0..width]);
+            inverse1DOrigin(row, line, .irreversible_9_7, x0);
+            for (row) |*value| value.* *= scale;
+        }
     }
 
     // `inverse97VerticalBand`'s lifting steps. Step `k` updates the rows of
