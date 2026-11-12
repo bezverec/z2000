@@ -8979,27 +8979,17 @@ fn readStrictCodestreamMetadataForProfile(
         default_qcd_transform = component_coding[component].transform;
     } else if (all_components_have_coc) {
         // Every component has both overrides; the unused default is checked
-        // against the first component's style.
+        // against the first component's style, then against COD's own.
         default_qcd_levels = component_coding[0].levels;
         default_qcd_transform = component_coding[0].transform;
     }
-    const default_qcd = validateStrictQcdSegment(
-        qcd_payload,
-        bit_depth,
-        default_qcd_levels,
-        default_qcd_transform,
-    ) catch |err| switch (err) {
-        // A syntactically legal but unsupported default is irrelevant when
-        // every component replaces it with QCC. T.803 p0_03 uses scalar-
-        // derived QCD with 5/3 followed by a no-quantization QCC for its only
-        // component. Validate the deferred default's style-independent wire
-        // shape before accepting the complete override.
-        CodestreamError.UnsupportedPayload => if (all_components_have_qcc) blk: {
-            try validateStrictQcdWireShape(qcd_payload, default_qcd_levels);
-            break :blk null;
-        } else return err,
-        else => return err,
-    };
+    const default_qcd = if (qcd_component != null)
+        try validateStrictQcdSegment(qcd_payload, bit_depth, default_qcd_levels, default_qcd_transform)
+    else
+        try validateUnusedStrictQcd(qcd_payload, bit_depth, &.{
+            .{ .levels = default_qcd_levels, .transform = default_qcd_transform },
+            .{ .levels = levels, .transform = parsed_transform },
+        });
     if (default_qcd) |qcd_info| {
         qcd_band_count = qcd_info.bands;
         parsed_quantization = qcd_info.quantization;
@@ -9009,7 +8999,9 @@ fn readStrictCodestreamMetadataForProfile(
         parsed_qcd_steps = qcd_info.steps;
         parsed_qcd_step_count = qcd_info.step_count;
         for (component_qcd[0..component_count], component_coding[0..component_count]) |*component_info, coding| {
-            component_info.* = if (coding.levels < default_qcd_levels)
+            // Without a component that uses QCD, every entry is replaced by
+            // its QCC below.
+            component_info.* = if (qcd_component != null and coding.levels < default_qcd_levels)
                 try validateStrictQcdSegment(
                     strictQcdPrefix(qcd_payload, coding.levels),
                     bit_depth,
@@ -10019,6 +10011,42 @@ fn strictQcdPrefix(segment: []const u8, levels: u8) []const u8 {
         @backingInt(QuantizationStyle.scalar_expounded) => segment[0 .. 1 + 2 * bands],
         else => segment,
     };
+}
+
+const StrictQcdShape = struct {
+    levels: u8,
+    transform: WaveletTransform,
+};
+
+/// Validates a main-header QCD that every component replaces with a QCC
+/// (ISO A.6.5: QCC takes precedence over QCD). Nothing reads its steps, so it
+/// only has to be a well-formed QCD for one of `shapes`: the style of the
+/// components it would otherwise serve, or COD's own (Kakadu, and the
+/// z2000 encoder, size it for COD). A syntactically legal but unsupported
+/// default is accepted on its wire shape alone; T.803 p0_03 uses a scalar-
+/// derived QCD with 5/3 followed by a no-quantization QCC for its only
+/// component. Returns null when only the wire shape could be checked.
+fn validateUnusedStrictQcd(
+    segment: []const u8,
+    bit_depth: u8,
+    shapes: []const StrictQcdShape,
+) !?StrictQcdInfo {
+    var first_error: ?CodestreamError = null;
+    for (shapes) |shape| {
+        if (validateStrictQcdSegment(segment, bit_depth, shape.levels, shape.transform)) |info| {
+            return info;
+        } else |err| switch (err) {
+            CodestreamError.UnsupportedPayload => if (validateStrictQcdWireShape(segment, shape.levels)) {
+                return null;
+            } else |shape_err| {
+                if (first_error == null) first_error = shape_err;
+            },
+            else => if (first_error == null) {
+                first_error = err;
+            },
+        }
+    }
+    return first_error orelse CodestreamError.InvalidCodestream;
 }
 
 fn validateStrictQcdWireShape(segment: []const u8, levels: u8) !void {

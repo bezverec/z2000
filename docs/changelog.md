@@ -5,6 +5,18 @@ entries are grouped by development milestone rather than semantic version.
 
 ## Unreleased
 
+### Decoder Fixes (0.3.0 line)
+
+- A stream in which every component overrides COD's decomposition levels
+  with a COC and its quantization with a QCC decodes again. z2000's encoder
+  (like Kakadu) sizes the default QCD for COD's levels; the decoder checked
+  that QCD, which no component uses, against component 0's levels and
+  rejected the stream as invalid. It now accepts a default QCD that is well
+  formed for either (ISO A.6.5: QCC replaces QCD for its component).
+  `--component 0:levels=2` on a one-component image, or the same override
+  on every component of an RGB one, failed to decode before; Kakadu
+  decoded both.
+
 ### Faster HT Rate Targets (0.3.0 line)
 
 - A rate-targeted HT block is first coded at cleanup plane 0 only, with an

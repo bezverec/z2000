@@ -41615,6 +41615,65 @@ fn mainHeaderComponentMarkers(allocator: std.mem.Allocator, bytes: []const u8, m
     return found.toOwnedSlice(allocator);
 }
 
+test "every component overriding COD's levels still decodes" {
+    // The encoder sizes the unused default QCD for COD's levels while each
+    // component's QCC follows its COC; the decoder once checked that QCD
+    // against component 0's levels and rejected the stream (Kakadu decodes
+    // it). ISO A.6.5: QCC replaces QCD for its component.
+    const allocator = std.testing.allocator;
+    var prng = std.Random.DefaultPrng.init(0x2000_0c0c);
+    const random = prng.random();
+
+    const one = [_]GenericComponent{.{ .precision = 8 }};
+    const three = [_]GenericComponent{ .{ .precision = 8 }, .{ .precision = 8 }, .{ .precision = 8 } };
+    const Case = struct {
+        specs: []const GenericComponent,
+        overrides: []const codestream.ComponentCodingOverride,
+        levels: u8 = 5,
+    };
+    const cases = [_]Case{
+        .{ .specs = &one, .overrides = &.{.{ .component = 0, .levels = 2, .block_width = 16, .block_height = 16 }} },
+        .{ .specs = &three, .overrides = &.{
+            .{ .component = 0, .levels = 2 },
+            .{ .component = 1, .levels = 2 },
+            .{ .component = 2, .levels = 2 },
+        } },
+        .{ .specs = &three, .overrides = &.{
+            .{ .component = 0, .levels = 2 },
+            .{ .component = 1, .levels = 3 },
+            .{ .component = 2, .levels = 4 },
+        } },
+        // Deeper than COD.
+        .{ .specs = &three, .levels = 1, .overrides = &.{
+            .{ .component = 0, .levels = 4 },
+            .{ .component = 1, .levels = 2 },
+            .{ .component = 2, .levels = 3 },
+        } },
+    };
+    for (cases) |case| {
+        var source = try genericNativeSource(allocator, random, .{ 0, 0, 37, 41 }, case.specs);
+        defer source.deinit();
+        for ([_]bool{ false, true }) |high_throughput| {
+            const encoded = try codestream.encodeNativeLosslessWithOptions(allocator, source, .{
+                .mct = .none,
+                .levels = case.levels,
+                .high_throughput = high_throughput,
+                .component_coding = case.overrides,
+            });
+            defer allocator.free(encoded);
+            const qccs = try mainHeaderComponentMarkers(allocator, encoded, codestream.markerValue("qcc"), false);
+            defer allocator.free(qccs);
+            try std.testing.expectEqual(case.specs.len, qccs.len);
+
+            var decoded = try codestream.decodeLosslessNativeWithOptions(allocator, encoded, .{}, .{});
+            defer decoded.deinit();
+            for (source.planes, decoded.planes) |expected, actual| {
+                try std.testing.expectEqualSlices(i64, expected.samples, actual.samples);
+            }
+        }
+    }
+}
+
 test "wide encoder writes per-component coding as COC and QCC" {
     const allocator = std.testing.allocator;
     var prng = std.Random.DefaultPrng.init(0x2000_c0c);
