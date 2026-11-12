@@ -46,6 +46,22 @@ On Windows, the equivalent harness can include the irreversible profile:
   -OutDir .\zig-out\bench-compare -Runs 8 -Warmup 2 -Threads 16 -IncludeLossy
 ```
 
+## 2026-11-12: Intel Core i5-14500, 9/7 dequantized during Tier-1
+
+Base `959b6c5`, interleaved rounds (12 to 20), medians of the `--timings`
+total; the gate of the previous commit ran beside some of these rounds:
+
+| Stream | Threads | Before | After |
+| --- | --- | --- | --- |
+| HT 9/7 | 1 | 94.9 ms | 93.3 ms |
+| HT 9/7 | 20 | 24.7 ms | 23.6 ms |
+| Part 1 9/7 | 1 | 566.3 ms | 564.6 ms |
+
+The inverse DWT stage, which held the in-place dequantization, fell from
+9.8 to 3.9 ms at one thread; the block stage grew by less. Dequantizing
+Part 1 blocks this way at twenty threads was 3% slower (60.6 -> 62.5 ms,
+block stage 47.6 -> 51.2), so Part 1 planes keep the separate pass there.
+
 ## 2026-11-12: Intel Core i5-14500, finest 9/7 rows without copies
 
 Base `04b4a3e`, lossy HT `bench-rgb-2048.tif`, interleaved rounds (12),

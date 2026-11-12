@@ -15814,6 +15814,8 @@ const IrreversibleInversePlaneJob = struct {
     /// block by block (each block's midpoint rule needs its integers before
     /// they are overwritten) and allocates and faults in no second plane.
     in_place: bool = false,
+    /// In place and already dequantized block by block during Tier-1.
+    dequantized: bool = false,
     shape: wavelet.ResolutionShape = undefined,
     result: anyerror!void = {},
 };
@@ -15823,6 +15825,7 @@ fn irreversibleInversePlaneWorker(job: *IrreversibleInversePlaneJob) void {
 }
 
 fn irreversibleDequantizePlane(job: *IrreversibleInversePlaneJob) !void {
+    if (job.dequantized) return;
     if (job.in_place) return dequantizeBlocksInPlace(job, 0, (job.blocks orelse return CodestreamError.InvalidCodestream).len);
     @memset(job.plane, 0);
     for (job.bands, job.deltas) |band, delta| {
@@ -15880,6 +15883,31 @@ fn dequantizeBlocksInPlace(job: *const IrreversibleInversePlaneJob, begin: usize
         if (end_x > job.width or end_y > job.height) return CodestreamError.InvalidCodestream;
         dequantizeBlockInPlace(plane, job.width, block, job.deltas[block.band_index]);
     }
+}
+
+fn allHighThroughputBlocks(blocks: []const StrictPacketBlock) bool {
+    for (blocks) |block| {
+        if (!block.code_block_style.high_throughput) return false;
+    }
+    return true;
+}
+
+/// Whether `block` can be dequantized as soon as it is decoded: always for
+/// a plane without `dequantize`, else when its band has a step and it lies
+/// in the plane.
+fn strictBlockDequantizable(target: anytype, block: StrictPacketBlock) bool {
+    const deltas = target.dequantize orelse return true;
+    return block.band_index < deltas.len and
+        block.rect.x + block.rect.width <= target.width and block.rect.y + block.rect.height <= target.height;
+}
+
+/// `dequantizeBlockInPlace` of a just decoded block (or of the zeros of one
+/// with nothing to decode) of a plane with `dequantize`; the plane's job
+/// then skips its own pass (`IrreversibleInversePlaneJob.dequantized`).
+fn dequantizeDecodedStrictBlock(target: anytype, block: StrictPacketBlock) void {
+    const deltas = target.dequantize orelse return;
+    if (@TypeOf(target.plane) != []i32) return;
+    dequantizeBlockInPlace(target.plane, target.width, block, deltas[block.band_index]);
 }
 
 fn dequantizeBlockInPlace(plane: []i32, width: usize, block: StrictPacketBlock, delta: f64) void {
@@ -15941,6 +15969,7 @@ const DequantizeBlocksJob = struct {
 /// writing every band) split by rows over up to eight workers; an in-place
 /// job is split by blocks instead.
 fn irreversibleDequantizePlaneThreaded(job: *IrreversibleInversePlaneJob, thread_count: u8) !void {
+    if (job.dequantized) return;
     if (job.in_place) {
         const blocks = job.blocks orelse return CodestreamError.InvalidCodestream;
         const workers = @min(@as(usize, @max(thread_count, 1)), max_dequantize_workers, @max(blocks.len, 1));
@@ -16509,6 +16538,8 @@ fn StrictBlockDecodeTargetFor(comptime Coefficient: type) type {
         blocks: []const StrictPacketBlock,
         bands: []const subband.Band,
         plane: []Coefficient,
+        /// `StrictComponentFill.dequantize`.
+        dequantize: ?[]const f64 = null,
     };
 }
 
@@ -16591,10 +16622,19 @@ fn strictBlockDecodeWorker(job: anytype) void {
         const order_index = job.next_block.fetchAdd(1, .monotonic);
         if (order_index >= job.block_order.len) break;
         const ref = job.block_order[order_index];
-        defer completeStrictDecodeBlock(job, ref.target);
         const target = job.targets[ref.target];
         const block_index: usize = ref.block;
         const block = target.blocks[block_index];
+        if (!strictBlockDequantizable(target, block)) {
+            job.result = CodestreamError.InvalidCodestream;
+            completeStrictDecodeBlock(job, ref.target);
+            return;
+        }
+        // Before the block counts as done: the finisher may take the plane.
+        defer {
+            dequantizeDecodedStrictBlock(target, block);
+            completeStrictDecodeBlock(job, ref.target);
+        }
         if (block.rect.width == 0 or block.rect.height == 0) {
             job.result = CodestreamError.InvalidCodestream;
             return;
@@ -16808,6 +16848,18 @@ fn reconstructStrictComponentCoefficientPlanesFinishing(
             .roi_shift = componentRoiShiftForHeader(header, component),
             .plane = plane_slices[component],
         };
+        // ROI undo has to come before the dequantization. On several
+        // threads Part 1 blocks keep Tier-1 the bottleneck, where the extra
+        // work costs more than the separate pass it saves; HT blocks gain.
+        if (in_place) |reconstruction| {
+            const job = &reconstruction.jobs[component];
+            if (fill.roi_shift == 0 and job.reduction == 0 and job.blocks != null and
+                (options.threads < 2 or allHighThroughputBlocks(job.blocks.?)))
+            {
+                fill.dequantize = job.deltas;
+                job.dequantized = true;
+            }
+        }
     }
     try fillStrictComponentsCoefficientsFromBlockCatalog(
         i32,
@@ -16910,6 +16962,10 @@ fn StrictComponentFill(comptime Coefficient: type) type {
         height: usize,
         roi_shift: u8,
         plane: []Coefficient,
+        /// The band steps of an in-place 9/7 plane without ROI: each block
+        /// is then dequantized as soon as it is decoded, while its samples
+        /// are in the cache (`dequantizeBlockInPlace`).
+        dequantize: ?[]const f64 = null,
     };
 }
 
@@ -17025,6 +17081,7 @@ fn prepareStrictComponentFill(
             .blocks = blocks,
             .bands = bands,
             .plane = plane,
+            .dequantize = fill.dequantize,
         },
         .required_width = required_width,
         .required_height = required_height,
@@ -17113,6 +17170,8 @@ fn decodeStrictComponentBlocksSerial(
 
     for (blocks, 0..) |block, block_index| {
         if (block.rect.width == 0 or block.rect.height == 0) return CodestreamError.InvalidCodestream;
+        if (!strictBlockDequantizable(target, block)) return CodestreamError.InvalidCodestream;
+        defer dequantizeDecodedStrictBlock(target, block);
         // A block inside the retained resolutions still occupies the checked
         // coverage area when the selected region prunes it, so its zeroed
         // coefficients are marked covered instead of decoded.
