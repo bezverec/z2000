@@ -376,15 +376,15 @@ fn inverse97(data: []f32, scratch: []f32) void {
     const even_count = (data.len + 1) / 2;
     const even = scratch[0..even_count];
     const odd = scratch[even_count..data.len];
-    @memcpy(even, data[0..even_count]);
-    @memcpy(odd, data[even_count..]);
-    scaleSplit(even, dwt97_k);
-    scaleSplit(odd, dwt97_inv_k);
+    // The halves are scaled on their way into scratch, and the last lifting
+    // step writes the line back interleaved: the same operations as
+    // copying, scaling, lifting, and interleaving one after another.
+    scaleSplitInto(even, data[0..even_count], dwt97_k);
+    scaleSplitInto(odd, data[even_count..], dwt97_inv_k);
     liftSplitEven(even, odd, -dwt97_delta);
     liftSplitOdd(even, odd, -dwt97_gamma);
     liftSplitEven(even, odd, -dwt97_beta);
-    liftSplitOdd(even, odd, -dwt97_alpha);
-    interleaveSplit(data, even, odd);
+    liftSplitOddInterleave(data, even, odd, -dwt97_alpha);
 }
 
 fn forward97OddOrigin(data: []f32, scratch: []f32) void {
@@ -454,6 +454,49 @@ fn liftSplitEven(even: []f32, odd: []f32, coefficient: f32) void {
     while (j < even.len) : (j += 1) {
         const right = if (j < odd.len) odd[j] else odd[j - 1];
         even[j] += coefficient * (odd[j - 1] + right);
+    }
+}
+
+/// `liftSplitOdd`, then `interleaveSplit` of the result into `data`.
+fn liftSplitOddInterleave(data: []f32, even: []const f32, odd: []f32, coefficient: f32) void {
+    const coeff: F32Block = @splat(coefficient);
+    var j: usize = 0;
+    while (j + f32_block_lanes <= odd.len and j + 1 + f32_block_lanes <= even.len) : (j += f32_block_lanes) {
+        const target: F32Block = odd[j..][0..f32_block_lanes].*;
+        const left: F32Block = even[j..][0..f32_block_lanes].*;
+        const right: F32Block = even[j + 1 ..][0..f32_block_lanes].*;
+        const pair: @Vector(2 * f32_block_lanes, f32) = @shuffle(f32, left, target + coeff * (left + right), f32_interleave_mask);
+        data[2 * j ..][0 .. 2 * f32_block_lanes].* = @as([2 * f32_block_lanes]f32, pair);
+    }
+    while (j < odd.len) : (j += 1) {
+        const right = if (j + 1 < even.len) even[j + 1] else even[j];
+        odd[j] += coefficient * (even[j] + right);
+        data[2 * j] = even[j];
+        data[2 * j + 1] = odd[j];
+    }
+    if (even.len > odd.len) data[2 * odd.len] = even[odd.len];
+}
+
+/// Lane i of the first vector, then lane i of the second.
+const f32_interleave_mask = blk: {
+    var mask: [2 * f32_block_lanes]i32 = undefined;
+    for (0..f32_block_lanes) |index| {
+        mask[2 * index] = @intCast(index);
+        mask[2 * index + 1] = -@as(i32, @intCast(index + 1));
+    }
+    break :blk mask;
+};
+
+/// `half = source * scale`, as copying then `scaleSplit`.
+fn scaleSplitInto(half: []f32, source: []const f32, scale: f32) void {
+    const scales: F32Block = @splat(scale);
+    var j: usize = 0;
+    while (j + f32_block_lanes <= half.len) : (j += f32_block_lanes) {
+        const block: F32Block = source[j..][0..f32_block_lanes].*;
+        half[j..][0..f32_block_lanes].* = @as([f32_block_lanes]f32, block * scales);
+    }
+    while (j < half.len) : (j += 1) {
+        half[j] = source[j] * scale;
     }
 }
 

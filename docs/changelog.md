@@ -45,6 +45,10 @@ entries are grouped by development milestone rather than semantic version.
   results as the scalar clamp (unit test over 20,000 vectors including
   halves, infinities, and NaN). At one thread it takes 5.9 ms instead of
   18.3 on the 2048x2048 RGB image.
+- The 9/7 row synthesis scales the halves on their way into scratch and
+  lets the last lifting step write the line back interleaved (two copies,
+  two scalings, and the interleave pass fewer); bit-identical, one
+  2048x2048 plane 4.0 ms instead of 4.7.
 
 ### Faster HT Block Decoding (0.3.0 line)
 
