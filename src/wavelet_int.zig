@@ -1069,51 +1069,32 @@ fn inverse53Columns(data: []i32, stride: usize, width: usize, height: usize, scr
     }
 }
 
+/// 5/3 synthesis of `lanes` columns (F.3.7) straight from their halves:
+/// the even rows into `scratch`, then the odd ones, each pair of rows
+/// written into place. Rows 2k and 2k + 1 never hold a high-pass row still
+/// to be read.
 fn inverse53ColumnVector(comptime lanes: usize, data: []i32, stride: usize, col: usize, height: usize, scratch: []i32) void {
+    const Vector = @Vector(lanes, i32);
     const lows = lowCount(height);
-    var row: usize = 0;
-    var packed_row: usize = 0;
-    while (row < height) : (row += 2) {
-        storeScratchVector(scratch, row, loadVector(lanes, data, stride, packed_row, col));
-        packed_row += 1;
+    const highs = height / 2;
+
+    var k: usize = 0;
+    while (k < lows) : (k += 1) {
+        const left = loadVector(lanes, data, stride, lows + (if (k > 0) k - 1 else 0), col);
+        const right = loadVector(lanes, data, stride, lows + (if (k < highs) k else k - 1), col);
+        const value: Vector = loadVector(lanes, data, stride, k, col) - floorQuarterBiasedVector(left + right);
+        storeScratchVector(scratch, k, value);
     }
 
-    row = 1;
-    packed_row = lows;
-    while (row < height) : (row += 2) {
-        storeScratchVector(scratch, row, loadVector(lanes, data, stride, packed_row, col));
-        packed_row += 1;
+    k = 0;
+    while (k < highs) : (k += 1) {
+        const left = loadScratchVector(lanes, scratch, k);
+        const right = loadScratchVector(lanes, scratch, if (k + 1 < lows) k + 1 else k);
+        const value = loadVector(lanes, data, stride, lows + k, col);
+        storeVector(data, stride, 2 * k, col, left);
+        storeVector(data, stride, 2 * k + 1, col, value + floorHalfVector(left + right));
     }
-
-    row = 0;
-    while (row < height) : (row += 2) {
-        const left = if (row > 0)
-            loadScratchVector(lanes, scratch, row - 1)
-        else
-            loadScratchVector(lanes, scratch, 1);
-        const right = if (row + 1 < height)
-            loadScratchVector(lanes, scratch, row + 1)
-        else
-            loadScratchVector(lanes, scratch, row - 1);
-        const updated = loadScratchVector(lanes, scratch, row) - floorQuarterBiasedVector(left + right);
-        storeScratchVector(scratch, row, updated);
-    }
-
-    row = 1;
-    while (row < height) : (row += 2) {
-        const right = if (row + 1 < height)
-            loadScratchVector(lanes, scratch, row + 1)
-        else
-            loadScratchVector(lanes, scratch, row - 1);
-        const updated = loadScratchVector(lanes, scratch, row) +
-            floorHalfVector(loadScratchVector(lanes, scratch, row - 1) + right);
-        storeScratchVector(scratch, row, updated);
-    }
-
-    row = 0;
-    while (row < height) : (row += 1) {
-        storeVector(data, stride, row, col, loadScratchVector(lanes, scratch, row));
-    }
+    if (height > 2 * highs) storeVector(data, stride, height - 1, col, loadScratchVector(lanes, scratch, lows - 1));
 }
 
 fn inverse53ColumnScalar(data: []i32, stride: usize, col: usize, height: usize, scratch: []i32) void {
@@ -1222,29 +1203,45 @@ fn inverse53LineOrigin(data: []i32, scratch: []i32, origin: u32) void {
     }
 }
 
+/// One 5/3 synthesis line (F.3.7) straight from its halves: the even
+/// samples into `scratch`, then the odd ones, each pair written into place.
+/// A pair's writes never reach high-pass samples still to be read.
 fn inverse53Line(data: []i32, scratch: []i32) void {
-    if (data.len < 2) return;
-    unpackEvenOdd(data, scratch);
+    const n = data.len;
+    if (n < 2) return;
+    const lows = lowCount(n);
+    const highs = n / 2;
+    const low = data[0..lows];
+    const high = data[lows..n];
+    const even = scratch[0..lows];
 
-    data[0] -= floorQuarterBiased(data[1] + data[1]);
-    var i: usize = 2;
-    while (i + 1 + horizontal_pair_lanes <= data.len) : (i += horizontal_pair_lanes) {
-        inverse53UpdateHorizontalGroup(data, i);
+    even[0] = low[0] - floorQuarterBiased(high[0] + high[0]);
+    var k: usize = 1;
+    while (k + horizontal_lanes <= highs) : (k += horizontal_lanes) {
+        const left: HorizontalVector = high[k - 1 ..][0..horizontal_lanes].*;
+        const right: HorizontalVector = high[k..][0..horizontal_lanes].*;
+        const value: HorizontalVector = low[k..][0..horizontal_lanes].*;
+        even[k..][0..horizontal_lanes].* = value - floorQuarterBiasedHorizontal(left + right);
     }
-    while (i < data.len) : (i += 2) {
-        const left = data[i - 1];
-        const right = if (i + 1 < data.len) data[i + 1] else data[i - 1];
-        data[i] -= floorQuarterBiased(left + right);
+    while (k < lows) : (k += 1) {
+        const right = if (k < highs) high[k] else high[k - 1];
+        even[k] = low[k] - floorQuarterBiased(high[k - 1] + right);
     }
 
-    i = 1;
-    while (i + 1 + horizontal_pair_lanes <= data.len) : (i += horizontal_pair_lanes) {
-        inverse53PredictHorizontalGroup(data, i);
+    k = 0;
+    while (k + horizontal_lanes + 1 <= lows and k + horizontal_lanes <= highs) : (k += horizontal_lanes) {
+        const left: HorizontalVector = even[k..][0..horizontal_lanes].*;
+        const right: HorizontalVector = even[k + 1 ..][0..horizontal_lanes].*;
+        const value: HorizontalVector = high[k..][0..horizontal_lanes].*;
+        storeHorizontalPair(data, 2 * k, interleaveHorizontal(left, value + floorHalfHorizontal(left + right)));
     }
-    while (i < data.len) : (i += 2) {
-        const right = if (i + 1 < data.len) data[i + 1] else data[i - 1];
-        data[i] += floorHalf(data[i - 1] + right);
+    while (k < highs) : (k += 1) {
+        const right = if (k + 1 < lows) even[k + 1] else even[k];
+        const value = high[k];
+        data[2 * k] = even[k];
+        data[2 * k + 1] = value + floorHalf(even[k] + right);
     }
+    if (n > 2 * highs) data[n - 1] = even[lows - 1];
 }
 
 fn inverse53ColumnsOriginChecked(

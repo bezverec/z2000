@@ -46,6 +46,21 @@ On Windows, the equivalent harness can include the irreversible profile:
   -OutDir .\zig-out\bench-compare -Runs 8 -Warmup 2 -Threads 16 -IncludeLossy
 ```
 
+## 2026-11-12: Intel Core i5-14500, 5/3 synthesis in two sweeps
+
+Base `150c0bd`, `bench-rgb-2048.tif`, ReleaseFast, interleaved rounds,
+medians of `--timings` (inverse DWT, then total):
+
+| Stream | Threads | Inverse DWT | Total |
+| --- | --- | --- | --- |
+| HT lossless | 1 | 24.7 -> 12.1 ms | 102.4 -> 92.0 ms |
+| HT lossless | 20 | 1.12 -> 0.93 ms | 33.7 -> 29.5 ms |
+| Part 1 lossless | 1 | 24.2 -> 11.5 ms | 722.6 -> 693.3 ms |
+
+One 2048x2048 plane, five levels, in a microbenchmark: 7.0 -> 3.0 ms.
+The twenty-thread totals also gain from overlapping the synthesis with
+Tier-1 sooner.
+
 ## 2026-11-12: Intel Core i5-14500, HT unstuffing seven bytes at a time
 
 Base `491af57`, same image and method as the entry below:

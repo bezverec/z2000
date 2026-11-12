@@ -5,6 +5,19 @@ entries are grouped by development milestone rather than semantic version.
 
 ## Unreleased
 
+### Faster Decoder Synthesis (0.3.0 line)
+
+- The reversible 5/3 synthesis computes each line and each column strip
+  straight from its low and high halves in two sweeps: the even samples
+  into scratch, then the odd ones, every pair written into place (a pair
+  never overwrites a high-pass sample still to be read). It used to
+  interleave the halves first and lift in place, five sweeps for a column
+  strip and four with shuffles for a line. Output is unchanged (6,000
+  random planes, every entry point, origins, reductions, and thread counts
+  compared with the old code); one 2048x2048 plane takes 3.0 ms instead of
+  7.0. The lossless HT image's synthesis at one thread takes 12 ms (was
+  25); Part 1 lossless decodes gain the same.
+
 ### Faster HT Block Decoding (0.3.0 line)
 
 - The HT block decoder removes the MagSgn and VLC stuffing of a cleanup
