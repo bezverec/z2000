@@ -7928,6 +7928,25 @@ test "worker pool runs every index exactly once across repeated tasks" {
     }
 }
 
+test "worker pool page touches leave every byte as it was" {
+    // Regions of odd sizes, past and short of the 1 MiB runs, one of them
+    // empty, filled with a pattern the touches must keep.
+    const allocator = std.testing.allocator;
+    const sizes = [_]usize{ 3 * (1 << 20) + 4095, 0, 7, (1 << 20) - 1, 5 * 4096 + 1 };
+    var regions: [sizes.len][]u8 = undefined;
+    for (&regions, sizes) |*region, size| {
+        region.* = try allocator.alloc(u8, size);
+        for (region.*, 0..) |*byte, index| byte.* = @truncate(index *% 131 +% size);
+    }
+    defer for (regions) |region| allocator.free(region);
+    for ([_]usize{ 1, 2, 20 }) |threads| {
+        worker_pool.touchPages(threads, &regions);
+        for (regions, sizes) |region, size| {
+            for (region, 0..) |byte, index| try std.testing.expectEqual(@as(u8, @truncate(index *% 131 +% size)), byte);
+        }
+    }
+}
+
 test "worker pool tasks published while threads are still starting run exactly once" {
     // The background start overlaps the tasks; each must still see every
     // index once and return only after its own participants.

@@ -182,6 +182,43 @@ pub fn deinitInBackground(value: anytype) void {
     Release.run(value);
 }
 
+/// Faults in the pages of `regions` on up to `threads` threads, each taking
+/// contiguous runs, and leaves their contents as they were. Fresh pages
+/// that many threads first touch in a scattered order (a code-block's rows
+/// across a plane) fault far slower on Windows than the same pages touched
+/// run by run. Does nothing on one thread or when the pool is busy.
+pub fn touchPages(threads: usize, regions: []const []u8) void {
+    if (builtin.single_threaded or threads < 2) return;
+    const chunk_bytes = 1 << 20;
+    var chunk_count: usize = 0;
+    for (regions) |region| chunk_count += std.math.divCeil(usize, region.len, chunk_bytes) catch unreachable;
+    const Context = struct {
+        regions: []const []u8,
+
+        fn task(context: *anyopaque, index: usize) void {
+            const self: *const @This() = @ptrCast(@alignCast(context));
+            var remaining = index;
+            for (self.regions) |region| {
+                const chunks = std.math.divCeil(usize, region.len, chunk_bytes) catch unreachable;
+                if (remaining >= chunks) {
+                    remaining -= chunks;
+                    continue;
+                }
+                const start = remaining * chunk_bytes;
+                const bytes = region[start..@min(region.len, start + chunk_bytes)];
+                var offset: usize = 0;
+                while (offset < bytes.len) : (offset += std.heap.page_size_min) {
+                    const byte: *volatile u8 = &bytes[offset];
+                    byte.* = byte.*;
+                }
+                return;
+            }
+        }
+    };
+    var context = Context{ .regions = regions };
+    _ = run(threads, chunk_count, &context, Context.task);
+}
+
 /// `run` over a slice of jobs, one index per job, each handed to `work`.
 pub fn runJobs(comptime Job: type, jobs: []Job, comptime work: fn (*Job) void) bool {
     return runJobsOn(jobs.len, Job, jobs, work);

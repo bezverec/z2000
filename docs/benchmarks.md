@@ -46,6 +46,28 @@ On Windows, the equivalent harness can include the irreversible profile:
   -OutDir .\zig-out\bench-compare -Runs 8 -Warmup 2 -Threads 16 -IncludeLossy
 ```
 
+## 2026-11-12: Intel Core i5-14500, coefficient planes faulted in first
+
+Base `d659754`, `bench-rgb-2048.tif`, ReleaseFast, interleaved rounds (12),
+medians of `--timings` total (block payload in brackets):
+
+| Stream | Threads | Before | After |
+| --- | --- | --- | --- |
+| HT lossless | 20 | 28.1 (16.6) ms | 21.6 (9.6) ms |
+| HT lossless | 4 | 34.7 (22.9) ms | 28.4 (16.7) ms |
+| HT 9/7 | 20 | 33.0 (18.8) ms | 25.3 (11.5) ms |
+| HT 9/7 | 4 | 36.6 (23.5) ms | 31.6 (16.0) ms |
+| Part 1 lossless | 20 | 66.3 ms | 64.7 ms |
+| Part 1 9/7 | 20 | 58.7 ms | 58.1 ms |
+
+Found by zeroing the planes before Tier-1 as an experiment: the workers'
+mean time in the block stage at twenty threads fell from 16 to 6 ms while
+the serial zeroing took the 9 ms back. A microbenchmark faulting 48 MB in
+contiguous runs takes 5.3 ms on one thread and 1.4 to 1.7 ms on eight to
+twenty, so the run-by-run touch on the pool costs about 2 ms. Block-stage
+scaling of the lossless HT image before the change: 36.6 ms at two
+threads, 23.3 at four, 18.6 at eight, 18.5 at twelve, 20.0 at twenty.
+
 ## 2026-11-12: Intel Core i5-14500, 5/3 synthesis in two sweeps
 
 Base `150c0bd`, `bench-rgb-2048.tif`, ReleaseFast, interleaved rounds,

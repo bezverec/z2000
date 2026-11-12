@@ -16776,6 +16776,13 @@ fn reconstructStrictComponentCoefficientPlanesFinishing(
     while (allocated < 3) : (allocated += 1) {
         plane_slices[allocated] = try plane_allocator.alloc(i32, pixels);
     }
+    // Tier-1 writes each block's rows across the planes; fault the pages in
+    // run by run first.
+    worker_pool.touchPages(options.threads, &.{
+        std.mem.sliceAsBytes(plane_slices[0]),
+        std.mem.sliceAsBytes(plane_slices[1]),
+        std.mem.sliceAsBytes(plane_slices[2]),
+    });
     if (in_place) |reconstruction| reconstruction.borrowPlanes(plane_slices);
     var fills: [3]StrictComponentFill(i32) = undefined;
     for (&fills, 0..) |*fill, component| {

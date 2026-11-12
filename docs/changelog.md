@@ -5,6 +5,18 @@ entries are grouped by development milestone rather than semantic version.
 
 ## Unreleased
 
+### Coefficient Planes Faulted In First (0.3.0 line)
+
+- On two or more threads the decoder faults in the pages of its three
+  coefficient planes in 1 MiB runs on the pool before Tier-1 writes them.
+  A code-block's rows span many pages that other workers' blocks share,
+  and first touches in that order cost Windows several times as much: at
+  twenty threads the workers spent about 16 ms each in the block stage
+  instead of 5. The 2048x2048 RGB HT images decode in 21.6 ms (lossless,
+  was 28.1) and 25.3 ms (9/7, was 33.0) at twenty threads, 28.4 ms
+  (lossless, was 34.7) at four; Part 1 streams, where Tier-1 dominates,
+  change little. A unit test checks that the touches keep every byte.
+
 ### Faster Decoder Synthesis (0.3.0 line)
 
 - The reversible 5/3 synthesis computes each line and each column strip
