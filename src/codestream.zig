@@ -13219,7 +13219,9 @@ fn decodeStrictRpclImageFromBlockCatalogMeasured(
         }
         const first = reconstruction.jobs[0];
         if (rgb8) |raster| {
-            if (header.mct != .none and header.bit_depth == 8) {
+            // On one thread the whole-plane synthesis and ICT below beat
+            // the bands, whose context rows add a quarter to the finest level.
+            if (header.mct != .none and header.bit_depth == 8 and options.threads >= 2) {
                 // As `finishStrictRgb8InBands`: the finest level of the
                 // unfinished planes and the inverse ICT run in row bands.
                 const has_finest = try wavelet.inverse97ParallelAllButFinest(std.heap.smp_allocator, tail_planes, first.width, first.height, first.levels, first.x0, first.y0, options.threads);

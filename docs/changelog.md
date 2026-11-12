@@ -62,6 +62,11 @@ entries are grouped by development milestone rather than semantic version.
   Tier-1 the bottleneck there, and the extra work in it cost about 3% at
   twenty threads). Output unchanged; the lossy HT image decodes in 93 ms
   at one thread (was 95) and 23.6 ms at twenty (was 24.7).
+- On one thread the 8-bit RGB 9/7 tail synthesizes whole planes and then
+  runs the ICT, instead of the finest level in row bands, whose four rows
+  of context on either side add a quarter to that level's work; the bands
+  stay for several threads. Output unchanged; inverse DWT and ICT of the
+  lossy HT image together 21.8 ms at one thread (was 24.7).
 - A 9/7 decode on one thread dequantizes in the coefficient planes as the
   threaded decode does, instead of allocating, faulting in, and clearing a
   second set of f32 planes; the finest level and the inverse ICT then run

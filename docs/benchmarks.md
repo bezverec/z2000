@@ -46,6 +46,11 @@ On Windows, the equivalent harness can include the irreversible profile:
   -OutDir .\zig-out\bench-compare -Runs 8 -Warmup 2 -Threads 16 -IncludeLossy
 ```
 
+## 2026-11-12: Intel Core i5-14500, whole-plane 9/7 tail on one thread
+
+Base `53e125a`, lossy HT, one thread, 12 interleaved rounds: total
+94.1 -> 91.2 ms (inverse DWT 4.0 -> 16.4 ms, inverse MCT 20.7 -> 5.4 ms).
+
 ## 2026-11-12: Intel Core i5-14500, 9/7 dequantized during Tier-1
 
 Base `959b6c5`, interleaved rounds (12 to 20), medians of the `--timings`
