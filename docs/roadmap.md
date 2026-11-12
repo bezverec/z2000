@@ -98,6 +98,8 @@ checked semantics.
 ### 4. Performance And Scale
 
 Continue separate 5/3 lossless and 9/7 lossy campaigns. At `v0.2.0-rc.6`
+(the last Part 1 benchmark checkpoint; rc.7 only shaved about 1 ms off the
+threaded lossless encode)
 z2000 encodes as fast as Kakadu 8.4.1 at one thread and decodes 15-22%
 faster, and is ahead of OpenJPEG and Grok everywhere; at 20 threads it
 takes 1.17x Kakadu's time to encode and 1.09x to decode. Tier-1 is already

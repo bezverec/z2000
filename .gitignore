@@ -1,6 +1,7 @@
 .DS_Store
 .zig-cache/
 zig-out/
+zig-out-*/
 
 # Generated smoke/benchmark inputs and outputs.
 .bench/

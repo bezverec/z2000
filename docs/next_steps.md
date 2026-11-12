@@ -8,9 +8,9 @@ This is the only active implementation queue. Strategic policy is in
 
 - The bounded ISO scorecards remain 100/100 within the envelope documented in
   [`iso_coverage.md`](iso_coverage.md).
-- The separate general-purpose G0-G7 program is estimated at about 61%
+- The separate general-purpose G0-G7 program is estimated at about 65%
   complete (+/- 8 points), with the decode-first G0-G4 foundation at about
-  73%. The phase method and remaining-work table live in
+  75% (the 2026-10-23 phase table). The phase method and remaining-work table live in
   [`roadmap.md`](roadmap.md); these figures are not derived from the bounded
   100/100 scorecards.
 - All 16 official T.803 profile-0 streams decode against their references
