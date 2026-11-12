@@ -3461,24 +3461,21 @@ fn dequantizeBandRegion(src: []const i32, dst: []f32, stride: usize, rect: subba
     }
 }
 
-fn acceptsAll(context: *anyopaque, target: usize, progress: f64) bool {
-    _ = context;
-    _ = target;
-    _ = progress;
-    return true;
-}
-
 /// `StrictComponentFinisher` running the serial inverse 5/3 on a decoded
 /// plane (equal to the parallel transform byte for byte).
 const StrictInverse53Finisher = struct {
     width: usize,
     height: usize,
     levels: u8,
+    pool_start_ns: u64 = 0,
+    /// How long plane 0's serial transform took, once it ran.
+    first_job_ns: std.atomic.Value(u64) = std.atomic.Value(u64).init(0),
 
     fn finisher(self: *StrictInverse53Finisher, finished: []std.atomic.Value(bool)) StrictComponentFinisher {
+        self.pool_start_ns = monotonicNs();
         return .{
             .context = self,
-            .accepts = acceptsAll,
+            .accepts = accepts,
             .finish = finish,
             // The last plane completes when the pool drains; it is cheaper
             // on all DWT workers afterwards than on one worker at the end.
@@ -3487,12 +3484,26 @@ const StrictInverse53Finisher = struct {
         };
     }
 
-    fn finish(context: *anyopaque, target: usize, plane: []i32) anyerror!void {
-        _ = target;
+    /// As `StrictInverse97Finisher.accepts`: a later plane runs in the pool
+    /// only while its serial transform still fits in the pool's estimated
+    /// remaining Tier-1 time.
+    fn accepts(context: *anyopaque, target: usize, progress: f64) bool {
         const self: *StrictInverse53Finisher = @ptrCast(@alignCast(context));
+        if (target == 0) return true;
+        const job_ns = self.first_job_ns.load(.acquire);
+        if (job_ns == 0 or progress <= 0) return false;
+        const elapsed: f64 = @floatFromInt(monotonicNs() -| self.pool_start_ns);
+        const remaining = elapsed * (1.0 - progress) / progress;
+        return remaining >= @as(f64, @floatFromInt(job_ns));
+    }
+
+    fn finish(context: *anyopaque, target: usize, plane: []i32) anyerror!void {
+        const self: *StrictInverse53Finisher = @ptrCast(@alignCast(context));
+        const start = monotonicNs();
         var workspace = try wavelet_int.Workspace.init(std.heap.smp_allocator, @max(self.width, self.height));
         defer workspace.deinit();
         try wavelet_int.inverse53WithWorkspace(&workspace, plane, self.width, self.height, self.levels);
+        if (target == 0) self.first_job_ns.store(@max(monotonicNs() -| start, 1), .release);
     }
 };
 

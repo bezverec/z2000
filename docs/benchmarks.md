@@ -46,6 +46,16 @@ On Windows, the equivalent harness can include the irreversible profile:
   -OutDir .\zig-out\bench-compare -Runs 8 -Warmup 2 -Threads 16 -IncludeLossy
 ```
 
+## 2026-11-12: Intel Core i5-14500, timed 5/3 plane finishing
+
+Base `283f3a9`, lossless HT `bench-rgb-2048.tif`, interleaved rounds,
+medians of the `--timings` total: 2 threads 46.9 -> 46.5 ms, 3 threads
+35.4 -> 34.9, 4 threads 28.1 -> 28.8 (minimum 27.4 -> 27.5), 8 threads
+22.4 -> 22.0, 20 threads 22.2 -> 20.8 (block payload 10.2 -> 8.3); the
+Part 1 lossless stream at 20 threads 69.1 -> 67.2. Finishing only plane 0
+in the pool was as good at 20 threads (22.0 -> 20.5) but 3% slower at
+three; rejected for the timed rule.
+
 ## 2026-11-12: Intel Core i5-14500, one-thread decode tail
 
 Base `251ad96`, `bench-rgb-2048.tif`, ReleaseFast, interleaved rounds

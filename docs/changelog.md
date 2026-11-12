@@ -54,6 +54,13 @@ entries are grouped by development milestone rather than semantic version.
   second set of f32 planes; the finest level and the inverse ICT then run
   in row bands. The lossy HT image decodes in 95 ms at one thread (was
   105 with the two changes above); output unchanged.
+- The threaded 5/3 decode hands a later plane's inverse transform to the
+  worker that completes it only while that serial transform (timed on
+  plane 0) fits in the pool's estimated remaining Tier-1 time, as the 9/7
+  decode already did; otherwise the plane joins the parallel transform
+  after the pool. At twenty threads one worker no longer transforms
+  plane 1 after the others have drained the pool: the lossless HT image
+  decodes in 20.8 ms (was 22.2).
 
 ### Faster HT Block Decoding (0.3.0 line)
 
