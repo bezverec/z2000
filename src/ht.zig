@@ -108,7 +108,11 @@ pub fn Decoder(comptime Coefficient: type) type {
                 for (0..block.height) |y| @memset(out[y * stride ..][0..block.width], 0);
                 return;
             }
-            try self.decodeCleanup(block, out, stride);
+            // Lossless blocks, the common case, skip the scaling.
+            if (block.cleanup_plane == 0)
+                try self.decodeCleanup(false, block, out, stride)
+            else
+                try self.decodeCleanup(true, block, out, stride);
             if (block.passes == 1) return;
 
             // The refinement passes need cleanup significance apart from the
@@ -158,20 +162,20 @@ pub fn Decoder(comptime Coefficient: type) type {
         /// interleaving them by pair keeps each one's order. A block with
         /// only the cleanup pass gets its final values, midpoint included;
         /// with refinement passes, `mu_n << p` and the sign.
-        fn decodeCleanup(self: *Self, block: Block, out: []Coefficient, stride: usize) Error!void {
+        fn decodeCleanup(self: *Self, comptime scaled: bool, block: Block, out: []Coefficient, stride: usize) Error!void {
             const segment = try CleanupSegment.init(block.cleanup);
             var mag_sgn = try unstuffMagSgn(self.allocator, &self.mag_sgn_bits, block.cleanup[0..segment.prefix_length]);
             var mel = MelDecoder{ .reader = .{ .segment = segment, .position = segment.prefix_length } };
             var vlc = try unstuffVlc(self.allocator, &self.vlc_bits, segment);
             const quad_width = (block.width + 1) / 2;
             const quad_height = (block.height + 1) / 2;
-            const line_length = 2 * quad_width + 2;
-            try self.lines.resize(self.allocator, 4 * line_length);
+            // Two guard columns on the right too: the pair loop loads four
+            // exponents above a missing second quad.
+            const line_length = 2 * quad_width + 4;
+            try self.lines.resize(self.allocator, 2 * line_length);
             @memset(self.lines.items, 0);
-            var above_significance = self.lines.items[0..line_length];
-            var above_exponents = self.lines.items[line_length..][0..line_length];
-            var below_significance = self.lines.items[2 * line_length ..][0..line_length];
-            var below_exponents = self.lines.items[3 * line_length ..][0..line_length];
+            var above_exponents = self.lines.items[0..line_length];
+            var below_exponents = self.lines.items[line_length..][0..line_length];
             const quad_out = QuadOutput{
                 .out = out,
                 .stride = stride,
@@ -194,9 +198,6 @@ pub fn Decoder(comptime Coefficient: type) type {
             while (qy < quad_height) : (qy += 1) {
                 const initial = qy == 0;
                 const lines = Lines{
-                    .above_significance = above_significance,
-                    .above_exponents = above_exponents,
-                    .below_significance = below_significance,
                     .below_exponents = below_exponents,
                 };
                 var left_rho: u4 = 0;
@@ -206,9 +207,12 @@ pub fn Decoder(comptime Coefficient: type) type {
                     // A pair takes at most 38 VLC bits, two CxtVLC codewords
                     // and two U-VLC codes: all from one load.
                     var window = VlcWindow{ .bits = vlc.peek() };
-                    const first = try decodeSignificance(&window, &mel, quadContext(initial, left_rho, above_significance, qx), initial);
+                    // The four exponents above each quad, from one load.
+                    const above_first = aboveExponents(above_exponents, qx);
+                    const above_second = aboveExponents(above_exponents, qx + 1);
+                    const first = try decodeSignificance(&window, &mel, quadContext(initial, left_rho, above_first), initial);
                     var second = Quad{};
-                    if (pair) second = try decodeSignificance(&window, &mel, quadContext(initial, first.rho, above_significance, qx + 1), initial);
+                    if (pair) second = try decodeSignificance(&window, &mel, quadContext(initial, first.rho, above_second), initial);
                     left_rho = if (pair) second.rho else first.rho;
 
                     // U-VLC (7.3.6): both prefixes from one look-ahead,
@@ -222,22 +226,18 @@ pub fn Decoder(comptime Coefficient: type) type {
                     const residual1 = prefixes.base1 + s1 + 4 * decodeUExtension(&window, s1);
                     const residual2 = prefixes.base2 + s2 + 4 * decodeUExtension(&window, s2);
                     vlc.skip(window.used);
-                    try quad_out.write(first, exponentBound(first.rho, residual1, initial, above_exponents, qx), &mag_sgn, lines, qx, 2 * qy);
-                    if (pair) try quad_out.write(second, exponentBound(second.rho, residual2, initial, above_exponents, qx + 1), &mag_sgn, lines, qx + 1, 2 * qy);
+                    try quad_out.write(scaled, first, exponentBound(first.rho, residual1, initial, above_first), &mag_sgn, lines, qx, 2 * qy);
+                    if (pair) try quad_out.write(scaled, second, exponentBound(second.rho, residual2, initial, above_second), &mag_sgn, lines, qx + 1, 2 * qy);
                     // Reads past either stream fail here, a pair late; the
                     // padding behind the bits covers what a pair can read.
                     if (vlc.overrun() or mag_sgn.overrun()) return Error.InvalidBlock;
                 }
                 // The next quad row predicts from this one's bottom line.
-                std.mem.swap([]u8, &above_significance, &below_significance);
                 std.mem.swap([]u8, &above_exponents, &below_exponents);
             }
         }
 
         const Lines = struct {
-            above_significance: []const u8,
-            above_exponents: []const u8,
-            below_significance: []u8,
             below_exponents: []u8,
         };
 
@@ -252,7 +252,7 @@ pub fn Decoder(comptime Coefficient: type) type {
 
             /// Decode one quad's MagSgn values (7.3.8), write all of its
             /// samples, and record its bottom line for the next quad row.
-            inline fn write(self: QuadOutput, quad: Quad, bound: u8, mag_sgn: *UnstuffedBits, lines: Lines, qx: usize, y: usize) Error!void {
+            inline fn write(self: QuadOutput, comptime scaled: bool, quad: Quad, bound: u8, mag_sgn: *UnstuffedBits, lines: Lines, qx: usize, y: usize) Error!void {
                 const x = 2 * qx;
                 var values: [4]Coefficient = @splat(0);
                 var exponents: [2]u8 = @splat(0);
@@ -293,12 +293,18 @@ pub fn Decoder(comptime Coefficient: type) type {
                         const significant: u8 = (quad.rho >> j) & 1;
                         var value = raw[j];
                         value |= @as(u64, (quad.e_1 >> j) & 1) << @intCast(bits[j]);
-                        const magnitude = ((value >> 1) + 1) * significant;
+                        // value = 2 (mu - 1) + sign; an insignificant
+                        // sample reads no bits and has no known 1, so 0.
+                        const magnitude = (value >> 1) + significant;
                         if (at_limit and (magnitude >> @intCast(self.magnitude_limit)) != 0) return Error.InvalidBlock;
-                        const scaled: Coefficient = @intCast((magnitude << @intCast(self.plane)) | (self.half * significant));
-                        values[j] = if ((value & 1) != 0) -scaled else scaled;
-                        // E_n, 0 for an insignificant sample.
-                        if ((j & 1) != 0) exponents[j >> 1] = @as(u8, @intCast(65 - @clz(magnitude -% 1))) * significant;
+                        const coefficient: Coefficient = @intCast(if (scaled)
+                            (magnitude << @intCast(self.plane)) | (self.half * significant)
+                        else
+                            magnitude);
+                        values[j] = if ((value & 1) != 0) -coefficient else coefficient;
+                        // E_n, the bit length of 2 mu - 1 = value | 1; 0 for
+                        // an insignificant sample.
+                        if ((j & 1) != 0) exponents[j >> 1] = 64 - @as(u8, @clz(value | significant));
                     }
                 }
                 const top = y * self.stride + x;
@@ -316,10 +322,7 @@ pub fn Decoder(comptime Coefficient: type) type {
                     }
                 }
                 // A padded column's entries are zero, as its samples are.
-                lines.below_significance[x + 1] = @intFromBool(exponents[0] != 0);
-                lines.below_significance[x + 2] = @intFromBool(exponents[1] != 0);
-                lines.below_exponents[x + 1] = exponents[0];
-                lines.below_exponents[x + 2] = exponents[1];
+                std.mem.writeInt(u16, lines.below_exponents[x + 1 ..][0..2], @as(u16, exponents[1]) << 8 | exponents[0], .little);
             }
         };
     };
@@ -1506,11 +1509,18 @@ const Quad = struct {
     e_1: u4 = 0,
 };
 
+/// The exponents E_n of the previous quad row's bottom line in columns
+/// 2 qx - 1 to 2 qx + 2, the first in the low byte; `line` has a zero guard
+/// column either side, so column x is at index x + 1, and an insignificant
+/// sample's exponent is 0.
+inline fn aboveExponents(line: []const u8, qx: usize) u32 {
+    return std.mem.readInt(u32, line[2 * qx ..][0..4], .little);
+}
+
 /// The context c_q of Formulas (1) and (2). `left_rho` is the significance
-/// of the quad to the left (zero for the first quad of a row); `above` holds
-/// the previous quad row's bottom line with a zero guard column either side,
-/// so column x is at index x + 1.
-inline fn quadContext(initial: bool, left_rho: u4, above: []const u8, qx: usize) u8 {
+/// of the quad to the left (zero for the first quad of a row); `above` is
+/// `aboveExponents` of the quad.
+inline fn quadContext(initial: bool, left_rho: u4, above: u32) u8 {
     const w: u8 = (left_rho >> 2) & 1;
     const sw: u8 = (left_rho >> 3) & 1;
     if (initial) {
@@ -1518,8 +1528,7 @@ inline fn quadContext(initial: bool, left_rho: u4, above: []const u8, qx: usize)
         const sf: u8 = (left_rho >> 1) & 1;
         return (f | sf) + 2 * w + 4 * sw;
     }
-    const c = 2 * qx + 1;
-    return (above[c - 1] | above[c]) + 2 * (w | sw) + 4 * (above[c + 1] | above[c + 2]);
+    return @as(u8, @intFromBool((above & 0xffff) != 0)) + 2 * (w | sw) + 4 * @as(u8, @intFromBool((above >> 16) != 0));
 }
 
 /// decodeSigEMB (7.3.5).
@@ -1531,23 +1540,15 @@ inline fn decodeSignificance(vlc: *VlcWindow, mel: *MelDecoder, context: u8, ini
     return .{ .rho = entry.rho, .u_off = entry.u_off, .e_k = entry.e_k, .e_1 = entry.e_1 };
 }
 
-/// kappa_q + u_q (7.3.7), with the exponents of the line above in the
-/// guard layout of `quadContext`.
-inline fn exponentBound(rho: u4, u: u8, initial: bool, above: []const u8, qx: usize) u8 {
+/// kappa_q + u_q (7.3.7), with `aboveExponents` of the quad.
+inline fn exponentBound(rho: u4, u: u8, initial: bool, above: u32) u8 {
     var kappa: u8 = 1;
     // gamma_q: more than one significant sample.
     if (!initial and @popCount(rho) > 1) {
-        const c = 2 * qx + 1;
-        const largest = @max(@max(above[c - 1], above[c]), @max(above[c + 1], above[c + 2]));
+        const largest = @reduce(.Max, @as(@Vector(4, u8), @bitCast(above)));
         if (largest > 1) kappa = largest - 1;
     }
     return kappa + u;
-}
-
-/// E_n of Table 1: the smallest E with 2 mu - 1 < 2^E.
-fn magnitudeExponent(magnitude: u64) u8 {
-    if (magnitude == 0) return 0;
-    return @intCast(65 - @clz(magnitude - 1));
 }
 
 /// Both U-VLC prefixes of a quad pair (Table 3) from six look-ahead bits:
@@ -1656,9 +1657,13 @@ const CleanupSegment = struct {
     bytes: []const u8,
     prefix_length: usize,
 
+    /// The byte pairs of 7.1.1 are checked while the MagSgn and VLC bytes
+    /// are unstuffed (`unstuffMagSgn`, `unstuffVlc`).
     fn init(bytes: []const u8) Error!CleanupSegment {
-        try checkSegmentBytes(bytes, max_cleanup_length);
+        if (bytes.len > max_cleanup_length) return Error.InvalidBlock;
         if (bytes.len < 2) return Error.InvalidBlock;
+        if (bytes[bytes.len - 1] == 0xff) return Error.InvalidBlock;
+        if (bytes[bytes.len - 2] == 0xff and bytes[bytes.len - 1] > 0x8f) return Error.InvalidBlock;
         const suffix_length = (@as(usize, bytes[bytes.len - 1]) << 4) | (bytes[bytes.len - 2] & 0x0f);
         if (suffix_length < 2 or suffix_length > @min(bytes.len, 4079)) return Error.InvalidBlock;
         const prefix_length = bytes.len - suffix_length;
@@ -1852,24 +1857,26 @@ const UnstuffedBits = struct {
 /// stream, and `peek` loads eight bytes.
 const unstuffed_padding = 80;
 
-/// Packs bit fields least significant first into `out`.
+/// Packs bit fields least significant first into `out`, which has eight
+/// bytes of room past the packed ones.
 const BitPacker = struct {
     out: []u8,
     index: usize = 0,
     buffer: u64 = 0,
+    /// Bits in `buffer` not yet past `index`, below 8 between calls.
     count: u7 = 0,
     total: usize = 0,
 
+    /// `width` up to 56 bits.
     inline fn put(self: *BitPacker, value: u64, width: u7) void {
         self.buffer |= value << @intCast(self.count);
         self.count += width;
         self.total += width;
-        if (self.count >= 32) {
-            std.mem.writeInt(u32, self.out[self.index..][0..4], @truncate(self.buffer), .little);
-            self.index += 4;
-            self.buffer >>= 32;
-            self.count -= 32;
-        }
+        std.mem.writeInt(u64, self.out[self.index..][0..8], self.buffer, .little);
+        const whole = self.count >> 3;
+        self.index += whole;
+        self.buffer >>= @intCast(whole * 8);
+        self.count &= 7;
     }
 
     /// Writes what is buffered, then the zero padding.
@@ -1879,10 +1886,27 @@ const BitPacker = struct {
     }
 };
 
+const low_bytes: u64 = 0x0101_0101_0101_0101;
+const high_bits: u64 = 0x8080_8080_8080_8080;
+
+/// Whether one of the seven low bytes of `word` is 0xFF.
+inline fn hasFfInSeven(word: u64) bool {
+    const inverted = ~word | 0xff00_0000_0000_0000;
+    return ((inverted -% low_bytes) & ~inverted & high_bits) != 0;
+}
+
+/// Whether one of the seven low bytes of `word` has its seven low bits
+/// set.
+inline fn hasLowSevenSetInSeven(word: u64) bool {
+    const cleared = ((word & 0x7f7f_7f7f_7f7f_7f7f) ^ 0x7f7f_7f7f_7f7f_7f7f) | 0xff00_0000_0000_0000;
+    return ((cleared -% low_bytes) & ~cleared & high_bits) != 0;
+}
+
 /// importMagSgnBit (7.1.2) over the whole MagSgn byte-stream: a byte after
 /// 0xFF gives only its seven low bits, whose stuffed top bit must be 0,
 /// and one 0xFF is read past the stream. Reading a bit from a byte with
 /// that top bit set, or past the 0xFF, fails, so the stream ends there.
+/// Checks the 7.1.1 byte pairs of the MagSgn bytes on the way.
 fn unstuffMagSgn(allocator: std.mem.Allocator, out: *std.ArrayList(u8), bytes: []const u8) Error!UnstuffedBits {
     try out.resize(allocator, bytes.len + 1 + 8 + unstuffed_padding);
     var packer = BitPacker{ .out = out.items };
@@ -1890,21 +1914,23 @@ fn unstuffMagSgn(allocator: std.mem.Allocator, out: *std.ArrayList(u8), bytes: [
     var index: usize = 0;
     var end: ?usize = null;
     while (index < bytes.len) {
-        // Four bytes at once when none but the last is 0xFF, so that each
-        // gives all eight bits.
-        if (last != 0xff and bytes.len - index >= 4) {
-            const word = std.mem.readInt(u32, bytes[index..][0..4], .little);
-            if ((word & 0xff) != 0xff and ((word >> 8) & 0xff) != 0xff and ((word >> 16) & 0xff) != 0xff) {
-                packer.put(word, 32);
-                last = @truncate(word >> 24);
-                index += 4;
+        // Seven bytes at once when none of them is 0xFF and the one before
+        // was not, so that each gives all eight bits.
+        if (last != 0xff and bytes.len - index >= 8) {
+            const word = std.mem.readInt(u64, bytes[index..][0..8], .little);
+            if (!hasFfInSeven(word)) {
+                packer.put(word & 0x00ff_ffff_ffff_ffff, 56);
+                last = @truncate(word >> 48);
+                index += 7;
                 continue;
             }
         }
         const value = bytes[index];
         if (last == 0xff) {
+            if (value > 0x8f) return Error.InvalidBlock;
             if ((value & 0x80) != 0) {
                 end = packer.total;
+                try checkSegmentBytes(bytes[index..], bytes.len);
                 break;
             }
             packer.put(value, 7);
@@ -1923,7 +1949,8 @@ fn unstuffMagSgn(allocator: std.mem.Allocator, out: *std.ArrayList(u8), bytes: [
 /// importVLCBit (7.1.4) over the whole VLC byte-stream: bytes read backward
 /// from Lcup - 2 to Pcup, skipping the twelve Scup bits and a stuffed top
 /// bit after a byte above 0x8F. Bits past Pcup read as zero but may not be
-/// taken.
+/// taken. Checks the 7.1.1 byte pairs of the bytes from Pcup to Lcup - 3
+/// on the way; `CleanupSegment.init` checks the last two.
 fn unstuffVlc(allocator: std.mem.Allocator, out: *std.ArrayList(u8), segment: CleanupSegment) Error!UnstuffedBits {
     const length = segment.bytes.len - segment.prefix_length;
     try out.resize(allocator, length + 8 + unstuffed_padding);
@@ -1935,19 +1962,22 @@ fn unstuffVlc(allocator: std.mem.Allocator, out: *std.ArrayList(u8), segment: Cl
     var position: isize = @as(isize, @intCast(segment.bytes.len)) - 3;
     const lowest_position: isize = @intCast(segment.prefix_length);
     while (position >= lowest_position) {
-        // Four bytes at once, read backward, when none has its seven low
-        // bits set: then none loses a stuffing bit whatever came before it.
-        // The bytes below Lcup - 2 are never the ones modDcup changes.
-        if (position - 3 >= lowest_position) {
-            const word = std.mem.readInt(u32, segment.bytes[@intCast(position - 3)..][0..4], .big);
-            if (!hasLowSevenSet(word)) {
-                packer.put(word, 32);
-                last = @truncate(word >> 24);
-                position -= 4;
+        // Seven bytes at once, read backward, when none has its seven low
+        // bits set: then none loses a stuffing bit whatever came before it,
+        // and none is 0xFF. The bytes below Lcup - 2 are never the ones
+        // modDcup changes.
+        if (position - 6 >= lowest_position and position >= 7) {
+            const word = std.mem.readInt(u64, segment.bytes[@intCast(position - 7)..][0..8], .big);
+            if (!hasLowSevenSetInSeven(word)) {
+                packer.put(word & 0x00ff_ffff_ffff_ffff, 56);
+                last = @truncate(word >> 48);
+                position -= 7;
                 continue;
             }
         }
         const value = segment.byte(@intCast(position));
+        // A raw 0xFF here is followed by a byte up to Lcup - 2.
+        if (value == 0xff and segment.bytes[@intCast(position + 1)] > 0x8f) return Error.InvalidBlock;
         const width: u7 = if (last > 0x8f and (value & 0x7f) == 0x7f) 7 else 8;
         packer.put(value & ((@as(u64, 1) << @intCast(width)) - 1), width);
         last = value;
@@ -1956,14 +1986,6 @@ fn unstuffVlc(allocator: std.mem.Allocator, out: *std.ArrayList(u8), segment: Cl
     const available = packer.total;
     packer.finish();
     return .{ .bytes = out.items, .available = available };
-}
-
-/// Whether any byte of `word` has its seven low bits all set.
-inline fn hasLowSevenSet(word: u32) bool {
-    inline for (0..4) |i| {
-        if (((word >> (8 * i)) & 0x7f) == 0x7f) return true;
-    }
-    return false;
 }
 
 /// importMagRefBit (7.1.6): bits least significant first from the end of
@@ -2081,6 +2103,7 @@ test "CxtVLC lookups resolve every context and look-ahead" {
             // A known 1 is only ever a known bit; QuadOutput.write's single
             // magnitude-limit check relies on it.
             try std.testing.expectEqual(@as(u4, 0), entry.e_1 & ~entry.e_k);
+            try std.testing.expectEqual(@as(u4, 0), entry.e_k & ~entry.rho);
         }
     }
     try std.testing.expectEqual(@as(usize, 444), cxt_vlc_table_0.len);
@@ -2286,22 +2309,54 @@ test "HT cleanup segments follow the T.814 7.1.1 byte rules" {
 
 test "unstuffed MagSgn and VLC bits match a bit-by-bit reading" {
     // Byte strings rich in the bytes the stuffing rules turn on (0xFF, 0x7F,
-    // 0x8F, 0x90, 0x80), with and without the fast four-byte paths.
+    // 0x8F, 0x90, 0x80), with and without the fast seven-byte paths.
     var prng = std.Random.DefaultPrng.init(0x2000_f0f0);
     const random = prng.random();
     const special = [_]u8{ 0xff, 0x7f, 0x8f, 0x90, 0x80, 0x00, 0x12, 0xfe };
     var unstuffed: std.ArrayList(u8) = .empty;
     defer unstuffed.deinit(std.testing.allocator);
     var bytes: [64]u8 = undefined;
-    for (0..4000) |_| {
+    for (0..20000) |_| {
         const length = 2 + random.uintLessThan(usize, bytes.len - 1);
         for (bytes[0..length]) |*byte| {
             byte.* = if (random.boolean()) special[random.uintLessThan(usize, special.len)] else random.int(u8);
         }
+        // A MagSgn stream never ends in 0xFF (7.1.1, Pcup - 1).
+        if (bytes[length - 1] == 0xff) bytes[length - 1] = 0x8f;
         const data = bytes[0..length];
 
+        // The 7.1.1 byte pairs fail the segment wherever they are.
+        if (!segmentPairsValid(data)) {
+            try std.testing.expectError(Error.InvalidBlock, unstuffMagSgn(std.testing.allocator, &unstuffed, data));
+        } else {
+            try expectMagSgnUnstuffed(&unstuffed, data);
+        }
+        // importVLCBit (7.1.4) backward from Lcup - 2 to Pcup, the modDcup
+        // bytes read as the decoder sees them; the pairs from Pcup to
+        // Lcup - 3 are checked here, the last two in CleanupSegment.init.
+        const suffix_length = 2 + random.uintLessThan(usize, length - 1);
+        const prefix_length = length - suffix_length;
+        const segment = CleanupSegment{ .bytes = data, .prefix_length = prefix_length };
+        if (!segmentPairsValid(data[prefix_length .. length - 1])) {
+            try std.testing.expectError(Error.InvalidBlock, unstuffVlc(std.testing.allocator, &unstuffed, segment));
+        } else {
+            try expectVlcUnstuffed(&unstuffed, segment);
+        }
+    }
+}
+
+fn segmentPairsValid(bytes: []const u8) bool {
+    if (bytes.len < 2) return true;
+    for (bytes[0 .. bytes.len - 1], bytes[1..]) |byte, next| {
+        if (byte == 0xff and next > 0x8f) return false;
+    }
+    return true;
+}
+
+fn expectMagSgnUnstuffed(unstuffed: *std.ArrayList(u8), data: []const u8) !void {
+    {
         // importMagSgnBit (7.1.2), one byte at a time.
-        const mag_sgn = try unstuffMagSgn(std.testing.allocator, &unstuffed, data);
+        const mag_sgn = try unstuffMagSgn(std.testing.allocator, unstuffed, data);
         var reader = mag_sgn;
         var expected: usize = 0;
         var last: u8 = 0;
@@ -2320,13 +2375,14 @@ test "unstuffed MagSgn and VLC bits match a bit-by-bit reading" {
         }
         if (!ended) expected += if (last == 0xff) 7 else 8;
         try std.testing.expectEqual(expected, mag_sgn.available);
+    }
+}
 
-        // importVLCBit (7.1.4) backward from Lcup - 2 to Pcup, the modDcup
-        // bytes read as the decoder sees them.
-        const suffix_length = 2 + random.uintLessThan(usize, length - 1);
-        const prefix_length = length - suffix_length;
-        const segment = CleanupSegment{ .bytes = data, .prefix_length = prefix_length };
-        var vlc = try unstuffVlc(std.testing.allocator, &unstuffed, segment);
+fn expectVlcUnstuffed(unstuffed: *std.ArrayList(u8), segment: CleanupSegment) !void {
+    const length = segment.bytes.len;
+    const prefix_length = segment.prefix_length;
+    {
+        var vlc = try unstuffVlc(std.testing.allocator, unstuffed, segment);
         var vlc_last = segment.byte(length - 2);
         var vlc_bits: usize = if (((vlc_last >> 4) & 7) < 7) 4 else 3;
         // The first nibble's bits.

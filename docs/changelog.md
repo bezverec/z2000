@@ -20,6 +20,14 @@ entries are grouped by development milestone rather than semantic version.
   110 ms at one thread (was 124; Tier-1 64 ms, was 80) and 34 ms at twenty
   (was 37). Decoded samples are unchanged; a new unit test checks the
   unstuffed bits against a bit-by-bit reading of random byte strings.
+- Second step: the unstuffing takes seven bytes at a time and checks the
+  T.814 7.1.1 byte pairs as it goes, replacing a separate scan of the whole
+  segment; lossless blocks (cleanup plane 0) skip the scaling of their
+  magnitudes; magnitudes and exponents come from the MagSgn value without
+  a multiplication; and one line of exponents (0 for an insignificant
+  sample) replaces the two lines of significance and exponents, a quad's
+  context and exponent bound reading its four neighbours in one load.
+  One thread: Tier-1 58 ms (was 64), the whole decode 103 ms (was 110).
 
 ### Decoder Fixes (0.3.0 line)
 

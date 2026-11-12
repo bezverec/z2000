@@ -46,6 +46,24 @@ On Windows, the equivalent harness can include the irreversible profile:
   -OutDir .\zig-out\bench-compare -Runs 8 -Warmup 2 -Threads 16 -IncludeLossy
 ```
 
+## 2026-11-12: Intel Core i5-14500, HT unstuffing seven bytes at a time
+
+Base `491af57`, same image and method as the entry below:
+
+| Threads | Rounds | Total | Block payload |
+| --- | --- | --- | --- |
+| 1 | 12 | 109.6 -> 103.1 ms | 64.9 -> 57.6 ms |
+| 20 | 20 | 37.2 -> 35.7 ms | 25.0 -> 22.9 ms |
+
+Microbenchmark (minimum of 30 rounds, quiet host): 52.4 ms before;
+magnitude `(v >> 1) + significant` and exponent `64 - clz(v | significant)`
+50.5; lossless blocks without the scaling 49.9; seven-byte unstuffing with
+the byte-pair checks folded in 46.0; one exponent line 44.3 (no change in
+time, one buffer fewer). Rejected: a branchless U-VLC extension (+1%) and
+the four MagSgn bit counts and offsets as bytes of one u32 (no change).
+What is left is about 20% in the CxtVLC and U-VLC lookups, whose loads
+form the loop's serial chain, and the per-sample MagSgn arithmetic.
+
 ## 2026-11-12: Intel Core i5-14500, HT block decoder without refills
 
 Base `806484f`, `bench-rgb-2048.tif` coded with `--ht` (lossless 5/3,

@@ -1091,8 +1091,8 @@ work; closing the gap needs the OpenJPH/Kakadu style (quad pairs through
 joint tables, vectorized MagSgn unpacking), and at many threads the stages
 around Tier-1. Speed, second pass, 2026-11-12: the block decoder reads
 unstuffed MagSgn and VLC bits without refills (Tier-1 at one thread 80 ->
-64 ms, the `--timings` total 124 -> 110 ms; twenty threads 37 -> 34 ms;
-these are in-process totals, not the wall times above). At one thread the rest is about 52 ms of block
+58 ms, the `--timings` total 124 -> 103 ms; twenty threads 37 -> 36 ms;
+these are in-process totals, not the wall times above). At one thread the rest is about 44 ms of block
 decoding, 9 ms of first touches of the coefficient planes, and 24 ms of
 5/3 synthesis; vector MagSgn lanes and a separate VLC pass per quad row
 were slower. Done, 2026-10-28: MIXED tile-components, each block's coder
