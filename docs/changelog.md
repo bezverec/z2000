@@ -49,6 +49,11 @@ entries are grouped by development milestone rather than semantic version.
   lets the last lifting step write the line back interleaved (two copies,
   two scalings, and the interleave pass fewer); bit-identical, one
   2048x2048 plane 4.0 ms instead of 4.7.
+- A 9/7 decode on one thread dequantizes in the coefficient planes as the
+  threaded decode does, instead of allocating, faulting in, and clearing a
+  second set of f32 planes; the finest level and the inverse ICT then run
+  in row bands. The lossy HT image decodes in 95 ms at one thread (was
+  105 with the two changes above); output unchanged.
 
 ### Faster HT Block Decoding (0.3.0 line)
 

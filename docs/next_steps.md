@@ -1099,7 +1099,8 @@ decoding, 9 ms of first touches of the coefficient planes, and 12 ms of
 from 134 to 110 ms); vector MagSgn lanes and a separate VLC pass per quad
 row were slower. Twenty threads: 21.6 ms since the planes are faulted in
 run by run before Tier-1 (was about 28; first touches in block order
-cost the workers some 10 ms each). Done, 2026-10-28: MIXED tile-components, each block's coder
+cost the workers some 10 ms each). One thread, after the decode-tail
+changes of 2026-11-12: 81 ms lossless, 95 ms 9/7. Done, 2026-10-28: MIXED tile-components, each block's coder
 told from its first non-empty codeword segment (T.814 A.4); all 40 WG1 HT
 streams decode. MULTIHT (more than one HT set per block) waits for the
 encoder: no WG1 stream has it, and Kakadu 8.4.1 with `Cplex` and

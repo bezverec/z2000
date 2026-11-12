@@ -13163,7 +13163,9 @@ fn decodeStrictRpclImageFromBlockCatalogMeasured(
     // (writing the output, typically).
     // A full decode dequantizes in place: the reconstruction borrows the
     // coefficient planes instead of allocating (and faulting in) 48 MB more.
-    var irreversible: ?IrreversibleReconstruction = if (overlap_97)
+    // On one thread too: no overlap, but no second set of planes either.
+    const in_place_97 = header.transform == .irreversible_9_7 and options.resolution_reduction == 0;
+    var irreversible: ?IrreversibleReconstruction = if (in_place_97)
         try IrreversibleReconstruction.initPlanes(std.heap.smp_allocator, header, 0, catalog, false)
     else
         null;
@@ -13171,6 +13173,8 @@ fn decodeStrictRpclImageFromBlockCatalogMeasured(
     var dwt97_finisher: StrictInverse97Finisher = undefined;
     const finisher: ?StrictComponentFinisher = if (overlap_dwt)
         dwt_finisher.finisher(&finished)
+    else if (!overlap_97)
+        null
     else if (irreversible) |*reconstruction| blk: {
         dwt97_finisher = .{ .reconstruction = reconstruction };
         break :blk dwt97_finisher.finisher(&finished);
