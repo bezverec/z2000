@@ -157,7 +157,8 @@ Order, each step under the normal slice gates:
    103 ms at one thread (Tier-1 80 -> 58 ms) and from 37 to 36 ms at
    twenty. At one thread that is still well behind Kakadu 8.4.1 (67.6 ms
    wall on 2026-10-28): about 44 ms of pure block decoding, 9 ms of first
-   touches of the coefficient planes, and the 24 ms 5/3 synthesis.
+   touches of the coefficient planes, and the 12 ms 5/3 synthesis (24
+   before its two-sweep rewrite, 2026-11-12; the whole decode 92 ms).
 3. JPH file format: the `jph ` brand and parametrized (H.273) colour.
    Done, 2026-10-28: 16 of the 20 WG1 JPH files render through the JP2
    path; a channel-reordering `cdef` and an unspecified colour space stay

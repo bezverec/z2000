@@ -1093,9 +1093,11 @@ around Tier-1. Speed, second pass, 2026-11-12: the block decoder reads
 unstuffed MagSgn and VLC bits without refills (Tier-1 at one thread 80 ->
 58 ms, the `--timings` total 124 -> 103 ms; twenty threads 37 -> 36 ms;
 these are in-process totals, not the wall times above). At one thread the rest is about 44 ms of block
-decoding, 9 ms of first touches of the coefficient planes, and 24 ms of
-5/3 synthesis; vector MagSgn lanes and a separate VLC pass per quad row
-were slower. Done, 2026-10-28: MIXED tile-components, each block's coder
+decoding, 9 ms of first touches of the coefficient planes, and 12 ms of
+5/3 synthesis (24 before the two-sweep 5/3 and 9/7 synthesis of
+2026-11-12, which with a vector ICT clamp also took the lossy HT decode
+from 134 to 110 ms); vector MagSgn lanes and a separate VLC pass per quad
+row were slower. Done, 2026-10-28: MIXED tile-components, each block's coder
 told from its first non-empty codeword segment (T.814 A.4); all 40 WG1 HT
 streams decode. MULTIHT (more than one HT set per block) waits for the
 encoder: no WG1 stream has it, and Kakadu 8.4.1 with `Cplex` and

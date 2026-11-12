@@ -1404,12 +1404,29 @@ fn loadIctRgbVector(samples: []const u16, pixel_index: usize, shift: IctVector) 
 }
 
 fn storeIctRgbVector(samples: anytype, pixel_index: usize, r: IctVector, g: IctVector, b: IctVector, max_sample: i32) void {
+    const red = clampToSampleVector(r, max_sample);
+    const green = clampToSampleVector(g, max_sample);
+    const blue = clampToSampleVector(b, max_sample);
     inline for (0..ict_lanes) |lane| {
         const base = (pixel_index + lane) * 3;
-        samples[base] = @intCast(clampToSample(r[lane], max_sample));
-        samples[base + 1] = @intCast(clampToSample(g[lane], max_sample));
-        samples[base + 2] = @intCast(clampToSample(b[lane], max_sample));
+        samples[base] = @intCast(red[lane]);
+        samples[base + 1] = @intCast(green[lane]);
+        samples[base + 2] = @intCast(blue[lane]);
     }
+}
+
+/// `clampToSample` lane by lane: `@round` (half away from zero) as the
+/// truncation plus a step away from zero where the dropped fraction is at
+/// least a half, and NaN to 0 through `@max`.
+fn clampToSampleVector(value: IctVector, max_sample: i32) @Vector(ict_lanes, u16) {
+    const zero: IctVector = @splat(0);
+    const one: IctVector = @splat(1);
+    const truncated = @trunc(value);
+    const away = @abs(value - truncated) >= @as(IctVector, @splat(0.5));
+    const step = @select(f32, value < zero, -one, one);
+    const rounded = truncated + @select(f32, away, step, zero);
+    const clamped = @min(@max(rounded, zero), @as(IctVector, @splat(@floatFromInt(max_sample))));
+    return @intFromFloat(clamped);
 }
 
 fn clampToSample(value: f32, max_sample: i32) u16 {
@@ -1417,6 +1434,28 @@ fn clampToSample(value: f32, max_sample: i32) u16 {
     const max_f: f32 = @floatFromInt(max_sample);
     const clamped = std.math.clamp(@round(value), 0.0, max_f);
     return @intFromFloat(clamped);
+}
+
+test "vector sample clamp matches the scalar one" {
+    var prng = std.Random.DefaultPrng.init(0x2000_1c7);
+    const random = prng.random();
+    const specials = [_]f32{ 0, -0.0, 0.5, -0.5, 1.5, 2.5, -2.5, 0.49999997, -0.49999997, 254.5, 255.5, 255.49998, 65535.5, 1e9, -1e9, std.math.inf(f32), -std.math.inf(f32), std.math.nan(f32), 8388607.5, 8388608.0, 16777216.0 };
+    for (0..20000) |round| {
+        var values: IctVector = undefined;
+        inline for (0..ict_lanes) |lane| {
+            values[lane] = switch ((round + lane) % 4) {
+                0 => specials[random.uintLessThan(usize, specials.len)],
+                1 => @as(f32, @floatFromInt(random.intRangeAtMost(i32, -300, 70000))) + 0.5,
+                else => (random.float(f32) - 0.25) * 70000,
+            };
+        }
+        for ([_]i32{ 255, 4095, 65535 }) |max_sample| {
+            const vector = clampToSampleVector(values, max_sample);
+            inline for (0..ict_lanes) |lane| {
+                try std.testing.expectEqual(clampToSample(values[lane], max_sample), vector[lane]);
+            }
+        }
+    }
 }
 
 fn maxSample(bit_depth: u8) !i32 {

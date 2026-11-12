@@ -63,6 +63,12 @@ The 9/7 column synthesis the same way (`--ht --transform 9-7` and the
 Part 1 9/7 default stream): inverse DWT at one thread 44.4 -> 30.3 ms (HT)
 and 41.9 -> 29.2 ms (Part 1), at twenty 3.3 -> 2.8 ms; one plane 9.3 ->
 4.8 ms. The rest of that stage is dequantization and the row synthesis.
+
+The inverse ICT with a vector clamp: 18.3 -> 5.9 ms at one thread (HT
+9/7), 17.8 -> 5.8 ms (Part 1 9/7), 4.3 -> 2.9 ms at twenty. All three
+changes together: the lossy HT decode's total 134.3 -> 110.4 ms at one
+thread, 42.7 -> 36.6 ms at twenty; Part 1 9/7 610.2 -> 578.9 ms at one
+thread.
 The twenty-thread totals also gain from overlapping the synthesis with
 Tier-1 sooner.
 

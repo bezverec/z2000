@@ -24,6 +24,12 @@ entries are grouped by development milestone rather than semantic version.
   the plane's strided rows. Bit-identical (5,000 random planes, f32
   compared bit for bit); one 2048x2048 plane takes 4.8 ms instead of 9.3,
   and the lossy HT image's synthesis stage at one thread 30 ms (was 44).
+- The inverse ICT into 8- or 16-bit samples rounds and clamps eight
+  samples at a time: `@round` (half away from zero) as truncation plus a
+  step where the dropped fraction is at least a half, NaN to 0, the same
+  results as the scalar clamp (unit test over 20,000 vectors including
+  halves, infinities, and NaN). At one thread it takes 5.9 ms instead of
+  18.3 on the 2048x2048 RGB image.
 
 ### Faster HT Block Decoding (0.3.0 line)
 
