@@ -99,36 +99,36 @@ jobs:
             platform: linux-x86_64
             target: x86_64-linux-musl
             emulated: false
-            zig_url: https://ziglang.org/download/0.17.0/zig-x86_64-linux-0.17.0.tar.xz
-            zig_sha: 1cbe9df9f27e6b78d14ccbca43b6703a404ef79ef1c463de901d7f088d4e2026
-            zig_dir: zig-x86_64-linux-0.17.0
+            zig_url: https://ziglang.org/download/0.17.1/zig-x86_64-linux-0.17.1.tar.xz
+            zig_sha: 3581863e3cbcfd0fce0efc682ce7e9e93da96668a977791d356a26d2a7e9b17a
+            zig_dir: zig-x86_64-linux-0.17.1
             executable: z2000
             alias: z2k
           - os: windows-latest
             platform: windows-x86_64
             target: native
             emulated: false
-            zig_url: https://ziglang.org/download/0.17.0/zig-x86_64-windows-0.17.0.zip
-            zig_sha: b5663f69581dcf391293fbf16c06cb80d81d806545ce618b4d0bab7f0eb8c428
-            zig_dir: zig-x86_64-windows-0.17.0
+            zig_url: https://ziglang.org/download/0.17.1/zig-x86_64-windows-0.17.1.zip
+            zig_sha: b03f477a1943673e02aca0f570e8030dffd536ce1f45cbc4d3326ec31159562e
+            zig_dir: zig-x86_64-windows-0.17.1
             executable: z2000.exe
             alias: z2k.exe
           - os: macos-15
             platform: macos-aarch64
             target: native
             emulated: false
-            zig_url: https://ziglang.org/download/0.17.0/zig-aarch64-macos-0.17.0.tar.xz
-            zig_sha: b607e9b9234790a008116ae5bdb71c6243b84b9fb42a53a9e70fde41c06c536a
-            zig_dir: zig-aarch64-macos-0.17.0
+            zig_url: https://ziglang.org/download/0.17.1/zig-aarch64-macos-0.17.1.tar.xz
+            zig_sha: 75f1bc7a1e9852f17ec9a0c1895f767c4ec56d46bc8a834920eece1d0359dd8d
+            zig_dir: zig-aarch64-macos-0.17.1
             executable: z2000
             alias: z2k
           - os: ubuntu-latest
             platform: linux-riscv64
             target: riscv64-linux-musl
             emulated: true
-            zig_url: https://ziglang.org/download/0.17.0/zig-x86_64-linux-0.17.0.tar.xz
-            zig_sha: 1cbe9df9f27e6b78d14ccbca43b6703a404ef79ef1c463de901d7f088d4e2026
-            zig_dir: zig-x86_64-linux-0.17.0
+            zig_url: https://ziglang.org/download/0.17.1/zig-x86_64-linux-0.17.1.tar.xz
+            zig_sha: 3581863e3cbcfd0fce0efc682ce7e9e93da96668a977791d356a26d2a7e9b17a
+            zig_dir: zig-x86_64-linux-0.17.1
             executable: z2000
             alias: z2k
     runs-on: ${{ matrix.os }}
@@ -139,7 +139,7 @@ jobs:
           ref: ${{ inputs.publish && inputs.tag || inputs.ref }}
           fetch-depth: 0
 
-      - name: Install Zig 0.17.0 (Linux)
+      - name: Install Zig 0.17.1 (Linux)
         if: runner.os == 'Linux'
         env:
           ZIG_URL: ${{ matrix.zig_url }}
@@ -153,7 +153,7 @@ jobs:
           tar -xf zig.tar.xz
           echo "$PWD/$ZIG_DIR" >> "$GITHUB_PATH"
 
-      - name: Install Zig 0.17.0 (macOS)
+      - name: Install Zig 0.17.1 (macOS)
         if: runner.os == 'macOS'
         env:
           ZIG_URL: ${{ matrix.zig_url }}
@@ -167,7 +167,7 @@ jobs:
           tar -xf zig.tar.xz
           echo "$PWD/$ZIG_DIR" >> "$GITHUB_PATH"
 
-      - name: Install Zig 0.17.0 (Windows)
+      - name: Install Zig 0.17.1 (Windows)
         if: runner.os == 'Windows'
         env:
           ZIG_URL: ${{ matrix.zig_url }}

@@ -6,10 +6,26 @@ records how it shows, why it happens, what z2000 does about it, and how to
 tell when the workaround can go. Recheck every entry when the pinned Zig
 version changes.
 
+## Moving From Zig 0.17.0 To 0.17.1
+
+z2000 builds with Zig 0.17.1; the release workflows pin it with the
+checksums from ziglang.org's `download/index.json` (the 0.17.0 checksums
+there matched the old pins). Nothing in the sources or the build script
+had to change, and `zig fmt` 0.17.1 leaves the tree as it is. Measured on
+2026-11-13 (x86_64-windows): Debug and ReleaseFast tests and the Part 1
+corpus pass; x86_64-linux-musl, riscv64-linux-musl, and aarch64-macos
+cross-builds succeed; 54 outputs compared between 0.17.0 and 0.17.1 builds
+of the same commit are byte-identical (lossless, 9/7, HT, rate-targeted,
+and tiled encodes at one and twenty threads, their decodes, and decodes of
+Kakadu HT and Part 1 streams); decode times are within the host's noise.
+The zlib reproduction below still returns an error in Debug, ReleaseSafe,
+and ReleaseFast.
+
 ## Moving From Zig 0.16 To 0.17
 
-z2000 builds with Zig 0.17.0 only; the release workflows pin it with the
-checksums from ziglang.org's `download/index.json`. What had to change:
+z2000 built with Zig 0.17.0 only until 0.17.1 (above); the release
+workflows pinned it with the checksums from ziglang.org's
+`download/index.json`. What had to change:
 
 - **Build script.** The build runs in a configure phase whose result Zig
   caches, then a make phase. `b.args` is gone; run steps take the
@@ -44,8 +60,8 @@ times within 2%.
 ## Truncated zlib Input Overruns `std.compress.flate.Decompress` (Zig 0.16.0)
 
 **Status:** fixed upstream in Zig 0.17.0, whose `tossBitsShort` subtracts
-the consumed bits. With 0.17.0 the reproduction returns an error in Debug
-and ReleaseFast, and every truncation of a 1423-byte zlib stream, plus the
+the consumed bits; still fixed in 0.17.1. With 0.17.0 the reproduction
+returns an error in Debug and ReleaseFast, and every truncation of a 1423-byte zlib stream, plus the
 14-byte `integer overflow` case below, ends in an error in Debug and
 ReleaseSafe. The workaround in `src/zlib_inflate.zig` is still in place: it
 costs nothing measurable and keeps a truncated stream from being read past

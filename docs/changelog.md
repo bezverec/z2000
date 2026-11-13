@@ -5,6 +5,13 @@ entries are grouped by development milestone rather than semantic version.
 
 ## Unreleased
 
+### Zig 0.17.1 (0.3.0 line)
+
+- z2000 builds with Zig 0.17.1, and the release workflows install it,
+  checked against the checksums of ziglang.org's download index. No source
+  change was needed; outputs are byte-identical to 0.17.0 builds
+  (`toolchain_notes.md` has the evidence).
+
 ### Coefficient Planes Faulted In First (0.3.0 line)
 
 - On two or more threads the decoder faults in the pages of its three
